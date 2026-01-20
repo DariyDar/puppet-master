@@ -6,11 +6,13 @@ import { getSavedUpgrades, getSavedPlayerStats } from '../../stores/gameStore';
 type EnemyState = 'idle' | 'chase' | 'attack' | 'flee' | 'dead';
 type UnitState = 'follow' | 'attack' | 'return' | 'dead';
 
-type PlayerDirection = 'down' | 'up' | 'left' | 'right';
+// 8 directions for player animations
+type PlayerDirection = 'down' | 'down_right' | 'right' | 'up_right' | 'up' | 'up_left' | 'left' | 'down_left';
 
 export class MainScene extends Phaser.Scene {
   // Player
   private player!: Phaser.Physics.Arcade.Sprite;
+  private playerShadow!: Phaser.GameObjects.Sprite;
   private playerSpeed: number = GAME_CONFIG.PLAYER_BASE_SPEED;
   private playerDamage: number = GAME_CONFIG.PLAYER_BASE_DAMAGE;
   private playerAttackRange: number = GAME_CONFIG.PLAYER_BASE_ATTACK_RANGE;
@@ -18,6 +20,7 @@ export class MainScene extends Phaser.Scene {
   private lastPlayerAttackTime: number = 0;
   private playerDirection: PlayerDirection = 'down';
   private isPlayerAttacking: boolean = false;
+  private isPlayerDraining: boolean = false;
 
   // Input
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -150,43 +153,82 @@ export class MainScene extends Phaser.Scene {
   }
 
   private createPlayerAnimations(): void {
-    const directions: PlayerDirection[] = ['down', 'up', 'left', 'right'];
+    const directions: PlayerDirection[] = ['down', 'down_right', 'right', 'up_right', 'up', 'up_left', 'left', 'down_left'];
     const frameRate = 12; // Animation speed
 
-    // Create idle animations for each direction
+    // Create animations for each direction (body + shadow)
     directions.forEach((dir) => {
+      // Idle body
       this.anims.create({
         key: `spider_idle_${dir}`,
         frames: this.anims.generateFrameNumbers(`spider_idle_${dir}`, { start: 0, end: 19 }),
         frameRate: frameRate,
         repeat: -1,
       });
-    });
+      // Idle shadow
+      this.anims.create({
+        key: `spider_idle_shadow_${dir}`,
+        frames: this.anims.generateFrameNumbers(`spider_idle_shadow_${dir}`, { start: 0, end: 19 }),
+        frameRate: frameRate,
+        repeat: -1,
+      });
 
-    // Create walk animations for each direction
-    directions.forEach((dir) => {
+      // Walk body
       this.anims.create({
         key: `spider_walk_${dir}`,
         frames: this.anims.generateFrameNumbers(`spider_walk_${dir}`, { start: 0, end: 19 }),
         frameRate: frameRate,
         repeat: -1,
       });
-    });
+      // Walk shadow
+      this.anims.create({
+        key: `spider_walk_shadow_${dir}`,
+        frames: this.anims.generateFrameNumbers(`spider_walk_shadow_${dir}`, { start: 0, end: 19 }),
+        frameRate: frameRate,
+        repeat: -1,
+      });
 
-    // Create attack animations for each direction
-    directions.forEach((dir) => {
+      // Attack body
       this.anims.create({
         key: `spider_attack_${dir}`,
         frames: this.anims.generateFrameNumbers(`spider_attack_${dir}`, { start: 0, end: 19 }),
         frameRate: frameRate * 1.5, // Attacks are faster
         repeat: 0, // Don't loop
       });
+      // Attack shadow
+      this.anims.create({
+        key: `spider_attack_shadow_${dir}`,
+        frames: this.anims.generateFrameNumbers(`spider_attack_shadow_${dir}`, { start: 0, end: 19 }),
+        frameRate: frameRate * 1.5,
+        repeat: 0,
+      });
+
+      // Nervous (soul drain) body
+      this.anims.create({
+        key: `spider_nervous_${dir}`,
+        frames: this.anims.generateFrameNumbers(`spider_nervous_${dir}`, { start: 0, end: 19 }),
+        frameRate: frameRate,
+        repeat: -1,
+      });
+      // Nervous shadow
+      this.anims.create({
+        key: `spider_nervous_shadow_${dir}`,
+        frames: this.anims.generateFrameNumbers(`spider_nervous_shadow_${dir}`, { start: 0, end: 19 }),
+        frameRate: frameRate,
+        repeat: -1,
+      });
     });
 
-    // Create death animation
+    // Create death animation (single direction)
     this.anims.create({
       key: 'spider_death',
       frames: this.anims.generateFrameNumbers('spider_death', { start: 0, end: 19 }),
+      frameRate: frameRate,
+      repeat: 0,
+    });
+    this.anims.create({
+      key: 'spider_death_shadow',
+      frames: this.anims.generateFrameNumbers('spider_death_shadow', { start: 0, end: 19 }),
       frameRate: frameRate,
       repeat: 0,
     });
@@ -385,6 +427,17 @@ export class MainScene extends Phaser.Scene {
   }
 
   private createPlayer(): void {
+    // Create shadow sprite first (renders below player)
+    this.playerShadow = this.add.sprite(
+      this.mapWidth / 2,
+      this.mapHeight / 2,
+      'spider_idle_shadow_down'
+    );
+    this.playerShadow.setScale(0.5);
+    this.playerShadow.setDepth(9); // Below player
+    this.playerShadow.setAlpha(0.6); // Semi-transparent shadow
+    this.playerShadow.play('spider_idle_shadow_down');
+
     // Create player with spider sprite
     this.player = this.physics.add.sprite(
       this.mapWidth / 2,
@@ -392,8 +445,8 @@ export class MainScene extends Phaser.Scene {
       'spider_idle_down'
     );
 
-    // Scale down the sprite (256x256 is too big, scale to ~64x64)
-    this.player.setScale(0.25);
+    // Scale the sprite (256x256 to ~128x128)
+    this.player.setScale(0.5);
 
     this.player.setCollideWorldBounds(true);
     this.player.setDepth(10);
@@ -405,8 +458,8 @@ export class MainScene extends Phaser.Scene {
 
     // Set hitbox (adjusted for scaled sprite)
     const body = this.player.body as Phaser.Physics.Arcade.Body;
-    body.setSize(180, 180); // Hitbox in original sprite coordinates
-    body.setOffset(38, 38); // Center the hitbox
+    body.setSize(140, 140); // Hitbox in original sprite coordinates
+    body.setOffset(58, 58); // Center the hitbox
 
     // Start idle animation
     this.player.play('spider_idle_down');
@@ -415,8 +468,14 @@ export class MainScene extends Phaser.Scene {
     this.player.on('animationcomplete', (anim: Phaser.Animations.Animation) => {
       if (anim.key.includes('attack')) {
         this.isPlayerAttacking = false;
-        // Return to idle after attack
-        this.player.play(`spider_idle_${this.playerDirection}`);
+        // Return to idle or nervous after attack
+        if (this.isPlayerDraining) {
+          this.player.play(`spider_nervous_${this.playerDirection}`);
+          this.playerShadow.play(`spider_nervous_shadow_${this.playerDirection}`);
+        } else {
+          this.player.play(`spider_idle_${this.playerDirection}`);
+          this.playerShadow.play(`spider_idle_shadow_${this.playerDirection}`);
+        }
       }
     });
   }
@@ -818,6 +877,7 @@ export class MainScene extends Phaser.Scene {
     // Don't allow movement during attack animation
     if (this.isPlayerAttacking) {
       this.player.setVelocity(0, 0);
+      this.updateShadowPosition();
       return;
     }
 
@@ -852,34 +912,61 @@ export class MainScene extends Phaser.Scene {
     const speed = this.playerSpeed * (this.joystickForce > 0.1 ? this.joystickForce : 1);
     this.player.setVelocity(velocityX * speed, velocityY * speed);
 
-    // Determine direction based on velocity (4-directional)
+    // Determine direction based on velocity (8-directional)
     const isMoving = velocityX !== 0 || velocityY !== 0;
 
     if (isMoving) {
-      // Determine primary direction
-      let newDirection: PlayerDirection = this.playerDirection;
-
-      if (Math.abs(velocityX) > Math.abs(velocityY)) {
-        // Horizontal movement dominant
-        newDirection = velocityX < 0 ? 'left' : 'right';
-      } else {
-        // Vertical movement dominant
-        newDirection = velocityY < 0 ? 'up' : 'down';
-      }
+      // Determine 8-directional direction based on angle
+      const newDirection = this.getDirectionFromVelocity(velocityX, velocityY);
 
       // Update direction and animation
       if (newDirection !== this.playerDirection || !this.player.anims.currentAnim?.key.includes('walk')) {
         this.playerDirection = newDirection;
         this.player.play(`spider_walk_${this.playerDirection}`, true);
+        this.playerShadow.play(`spider_walk_shadow_${this.playerDirection}`, true);
       }
     } else {
-      // Standing still - play idle animation
-      if (!this.player.anims.currentAnim?.key.includes('idle')) {
-        this.player.play(`spider_idle_${this.playerDirection}`, true);
+      // Standing still - play idle or nervous animation
+      if (this.isPlayerDraining) {
+        if (!this.player.anims.currentAnim?.key.includes('nervous')) {
+          this.player.play(`spider_nervous_${this.playerDirection}`, true);
+          this.playerShadow.play(`spider_nervous_shadow_${this.playerDirection}`, true);
+        }
+      } else {
+        if (!this.player.anims.currentAnim?.key.includes('idle')) {
+          this.player.play(`spider_idle_${this.playerDirection}`, true);
+          this.playerShadow.play(`spider_idle_shadow_${this.playerDirection}`, true);
+        }
       }
     }
 
+    // Update shadow position
+    this.updateShadowPosition();
+
     gameEvents.emit('player:position', { x: this.player.x, y: this.player.y });
+  }
+
+  private getDirectionFromVelocity(vx: number, vy: number): PlayerDirection {
+    // Calculate angle in degrees (0 = right, 90 = down, etc.)
+    const angle = Math.atan2(vy, vx) * (180 / Math.PI);
+
+    // Map angle to 8 directions (each direction covers 45 degrees)
+    // Angle ranges: right=-22.5 to 22.5, down_right=22.5 to 67.5, etc.
+    if (angle >= -22.5 && angle < 22.5) return 'right';
+    if (angle >= 22.5 && angle < 67.5) return 'down_right';
+    if (angle >= 67.5 && angle < 112.5) return 'down';
+    if (angle >= 112.5 && angle < 157.5) return 'down_left';
+    if (angle >= 157.5 || angle < -157.5) return 'left';
+    if (angle >= -157.5 && angle < -112.5) return 'up_left';
+    if (angle >= -112.5 && angle < -67.5) return 'up';
+    if (angle >= -67.5 && angle < -22.5) return 'up_right';
+
+    return 'down'; // Default
+  }
+
+  private updateShadowPosition(): void {
+    // Shadow follows player position with slight offset
+    this.playerShadow.setPosition(this.player.x, this.player.y + 5);
   }
 
   private handlePlayerAutoAttack(time: number): void {
@@ -947,19 +1034,15 @@ export class MainScene extends Phaser.Scene {
   private playerAttack(enemy: Phaser.Physics.Arcade.Sprite): void {
     const damage = this.playerDamage;
 
-    // Determine direction to enemy and set player direction
+    // Determine direction to enemy using 8-directional
     const dx = enemy.x - this.player.x;
     const dy = enemy.y - this.player.y;
+    this.playerDirection = this.getDirectionFromVelocity(dx, dy);
 
-    if (Math.abs(dx) > Math.abs(dy)) {
-      this.playerDirection = dx < 0 ? 'left' : 'right';
-    } else {
-      this.playerDirection = dy < 0 ? 'up' : 'down';
-    }
-
-    // Play attack animation
+    // Play attack animation (body + shadow)
     this.isPlayerAttacking = true;
     this.player.play(`spider_attack_${this.playerDirection}`, true);
+    this.playerShadow.play(`spider_attack_shadow_${this.playerDirection}`, true);
 
     // Deal damage
     this.dealDamageToEnemy(enemy, damage);
@@ -978,19 +1061,15 @@ export class MainScene extends Phaser.Scene {
     const depositId = deposit.getData('id') as string;
     const resourceType = deposit.getData('resourceType') as string;
 
-    // Determine direction to deposit and set player direction
+    // Determine direction to deposit using 8-directional
     const dx = deposit.x - this.player.x;
     const dy = deposit.y - this.player.y;
+    this.playerDirection = this.getDirectionFromVelocity(dx, dy);
 
-    if (Math.abs(dx) > Math.abs(dy)) {
-      this.playerDirection = dx < 0 ? 'left' : 'right';
-    } else {
-      this.playerDirection = dy < 0 ? 'up' : 'down';
-    }
-
-    // Play attack animation
+    // Play attack animation (body + shadow)
     this.isPlayerAttacking = true;
     this.player.play(`spider_attack_${this.playerDirection}`, true);
+    this.playerShadow.play(`spider_attack_shadow_${this.playerDirection}`, true);
 
     // Emit health changed event for HP bar
     gameEvents.emit('entity:health-changed', {
@@ -1574,8 +1653,13 @@ export class MainScene extends Phaser.Scene {
 
   private startSoulDrain(corpse: Phaser.Physics.Arcade.Sprite): void {
     this.isDrainingSoul = true;
+    this.isPlayerDraining = true;
     this.currentDrainTarget = corpse;
     this.drainProgress = 0;
+
+    // Play nervous (soul drain) animation
+    this.player.play(`spider_nervous_${this.playerDirection}`, true);
+    this.playerShadow.play(`spider_nervous_shadow_${this.playerDirection}`, true);
 
     // Create progress bar
     this.drainProgressBar = this.add.graphics();
@@ -1727,6 +1811,7 @@ export class MainScene extends Phaser.Scene {
 
   private cleanupSoulDrain(): void {
     this.isDrainingSoul = false;
+    this.isPlayerDraining = false;
     this.currentDrainTarget = null;
     this.drainProgress = 0;
 
@@ -1734,6 +1819,10 @@ export class MainScene extends Phaser.Scene {
       this.drainProgressBar.destroy();
       this.drainProgressBar = null;
     }
+
+    // Return to idle animation
+    this.player.play(`spider_idle_${this.playerDirection}`, true);
+    this.playerShadow.play(`spider_idle_shadow_${this.playerDirection}`, true);
   }
 
   // HP Bar methods

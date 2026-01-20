@@ -74,27 +74,27 @@ export class LoadingScene extends Phaser.Scene {
     // ========== SPIDER PLAYER SPRITESHEETS ==========
     // Each spritesheet is 1024x1280 with 4x5 grid = 20 frames, each frame 256x256
     const frameConfig = { frameWidth: 256, frameHeight: 256 };
+    const directions = ['down', 'down_right', 'right', 'up_right', 'up', 'up_left', 'left', 'down_left'];
 
-    // Idle animations (4 directions)
-    this.load.spritesheet('spider_idle_down', 'assets/sprites/spider/idle_down.png', frameConfig);
-    this.load.spritesheet('spider_idle_up', 'assets/sprites/spider/idle_up.png', frameConfig);
-    this.load.spritesheet('spider_idle_left', 'assets/sprites/spider/idle_left.png', frameConfig);
-    this.load.spritesheet('spider_idle_right', 'assets/sprites/spider/idle_right.png', frameConfig);
+    // Load all animations for 8 directions (body + shadow)
+    for (const dir of directions) {
+      // Idle
+      this.load.spritesheet(`spider_idle_${dir}`, `assets/sprites/spider/idle_${dir}.png`, frameConfig);
+      this.load.spritesheet(`spider_idle_shadow_${dir}`, `assets/sprites/spider/idle_shadow_${dir}.png`, frameConfig);
+      // Walk
+      this.load.spritesheet(`spider_walk_${dir}`, `assets/sprites/spider/walk_${dir}.png`, frameConfig);
+      this.load.spritesheet(`spider_walk_shadow_${dir}`, `assets/sprites/spider/walk_shadow_${dir}.png`, frameConfig);
+      // Attack
+      this.load.spritesheet(`spider_attack_${dir}`, `assets/sprites/spider/attack_${dir}.png`, frameConfig);
+      this.load.spritesheet(`spider_attack_shadow_${dir}`, `assets/sprites/spider/attack_shadow_${dir}.png`, frameConfig);
+      // Nervous (for soul drain)
+      this.load.spritesheet(`spider_nervous_${dir}`, `assets/sprites/spider/nervous_${dir}.png`, frameConfig);
+      this.load.spritesheet(`spider_nervous_shadow_${dir}`, `assets/sprites/spider/nervous_shadow_${dir}.png`, frameConfig);
+    }
 
-    // Walk animations (4 directions)
-    this.load.spritesheet('spider_walk_down', 'assets/sprites/spider/walk_down.png', frameConfig);
-    this.load.spritesheet('spider_walk_up', 'assets/sprites/spider/walk_up.png', frameConfig);
-    this.load.spritesheet('spider_walk_left', 'assets/sprites/spider/walk_left.png', frameConfig);
-    this.load.spritesheet('spider_walk_right', 'assets/sprites/spider/walk_right.png', frameConfig);
-
-    // Attack animations (4 directions)
-    this.load.spritesheet('spider_attack_down', 'assets/sprites/spider/attack_down.png', frameConfig);
-    this.load.spritesheet('spider_attack_up', 'assets/sprites/spider/attack_up.png', frameConfig);
-    this.load.spritesheet('spider_attack_left', 'assets/sprites/spider/attack_left.png', frameConfig);
-    this.load.spritesheet('spider_attack_right', 'assets/sprites/spider/attack_right.png', frameConfig);
-
-    // Death animation
+    // Death animation (single direction)
     this.load.spritesheet('spider_death', 'assets/sprites/spider/death.png', frameConfig);
+    this.load.spritesheet('spider_death_shadow', 'assets/sprites/spider/death_shadow.png', frameConfig);
 
     // ========== TILEMAPS ==========
     // Will be loaded when actual maps are created
