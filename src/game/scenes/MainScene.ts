@@ -947,19 +947,29 @@ export class MainScene extends Phaser.Scene {
   }
 
   private getDirectionFromVelocity(vx: number, vy: number): PlayerDirection {
-    // Calculate angle in degrees (0 = right, 90 = down, etc.)
+    // Calculate angle in degrees
+    // atan2 gives: 0°=right, 90°=down, 180°/-180°=left, -90°=up
     const angle = Math.atan2(vy, vx) * (180 / Math.PI);
 
-    // Map angle to 8 directions (each direction covers 45 degrees)
-    // Angle ranges: right=-22.5 to 22.5, down_right=22.5 to 67.5, etc.
-    if (angle >= -22.5 && angle < 22.5) return 'right';
-    if (angle >= 22.5 && angle < 67.5) return 'down_right';
-    if (angle >= 67.5 && angle < 112.5) return 'down';
-    if (angle >= 112.5 && angle < 157.5) return 'down_left';
-    if (angle >= 157.5 || angle < -157.5) return 'left';
-    if (angle >= -157.5 && angle < -112.5) return 'up_left';
-    if (angle >= -112.5 && angle < -67.5) return 'up';
-    if (angle >= -67.5 && angle < -22.5) return 'up_right';
+    // Testing results (iteration 3) - all sprites are rotated 90° CCW:
+    // up->right, down->left, left->up, right->down
+    // up_left->up_right, up_right->down_right, down_left->up_left, down_right->down_left
+    //
+    // To fix, rotate 90° clockwise in sprite selection:
+    // When I want 'up', use 'left' (because 'left' sprite shows as 'up')
+    // When I want 'down', use 'right'
+    // When I want 'left', use 'down'
+    // When I want 'right', use 'up'
+    // Same for diagonals - rotate 90° CW
+
+    if (angle >= -22.5 && angle < 22.5) return 'up';           // moving right -> sprite up
+    if (angle >= 22.5 && angle < 67.5) return 'up_left';       // moving down-right -> sprite up_left
+    if (angle >= 67.5 && angle < 112.5) return 'left';         // moving down -> sprite left
+    if (angle >= 112.5 && angle < 157.5) return 'down_left';   // moving down-left -> sprite down_left
+    if (angle >= 157.5 || angle < -157.5) return 'down';       // moving left -> sprite down
+    if (angle >= -157.5 && angle < -112.5) return 'down_right';// moving up-left -> sprite down_right
+    if (angle >= -112.5 && angle < -67.5) return 'right';      // moving up -> sprite right
+    if (angle >= -67.5 && angle < -22.5) return 'up_right';    // moving up-right -> sprite up_right
 
     return 'down'; // Default
   }
