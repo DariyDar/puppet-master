@@ -256,7 +256,7 @@ export const ENEMY_CONFIGS = {
     attackSpeed: 8 / 4, // 4 frames @ 8fps = 0.5s per attack = 2 attacks/sec
     attackFrameCount: 4,
     attackRange: 40,
-    moveSpeed: 80,
+    moveSpeed: 65, // slower than player (100) even when fleeing (65*1.2=78)
     aggroRadius: 150,
     behavior: 'coward' as const,
     expReward: 10,

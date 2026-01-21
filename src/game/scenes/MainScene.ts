@@ -66,6 +66,7 @@ export class MainScene extends Phaser.Scene {
   private storageZone!: Phaser.GameObjects.Zone;
   private isInStorageRange: boolean = false;
   private lastBaseRegenTime: number = 0;
+  private baseIndicatorArrow!: Phaser.GameObjects.Graphics;
   private workbenchBuilding!: Phaser.GameObjects.Sprite;
   private workbenchZone!: Phaser.GameObjects.Zone;
   private isInWorkbenchRange: boolean = false;
@@ -1099,6 +1100,11 @@ export class MainScene extends Phaser.Scene {
     this.createFarm(this.baseCenter.x - 140, this.baseCenter.y + 60, 'scrap_recycler');
     this.createFarm(this.baseCenter.x - 140, this.baseCenter.y - 60, 'polymer_recycler');
     this.createFarm(this.baseCenter.x + 140, this.baseCenter.y + 140, 'gem_refinery');
+
+    // Create base direction indicator (arrow) - will be updated in update loop
+    this.baseIndicatorArrow = this.add.graphics();
+    this.baseIndicatorArrow.setDepth(1000); // Always on top
+    this.baseIndicatorArrow.setScrollFactor(0); // Fixed to camera
   }
 
   private createFarm(x: number, y: number, farmType: FarmType): void {
@@ -1407,13 +1413,10 @@ export class MainScene extends Phaser.Scene {
     body.moves = false;
 
     // Set collider to bottom part of the tower (foundation)
-    const texture = this.textures.get('building_red_tower');
-    const frame = texture.get();
-    const scaledWidth = frame.width * 0.5;
-    const scaledHeight = frame.height * 0.5;
-    // Collider is 60% width, 25% height at the bottom
-    body.setSize(scaledWidth * 0.6, scaledHeight * 0.25);
-    body.setOffset(frame.width * 0.2, frame.height * 0.7);
+    // Tower sprite is 256x256, scaled to 0.5 = 128x128 display size
+    // Collider covers bottom 40% with good width
+    body.setSize(80, 50);
+    body.setOffset(88, 155); // Center horizontally, bottom of sprite
 
     // Set tower data
     tower.setData('type', 'tower');
@@ -1474,13 +1477,10 @@ export class MainScene extends Phaser.Scene {
     body.moves = false;
 
     // Set collider to bottom part of the house (foundation)
-    const texture = this.textures.get(spriteKey);
-    const frame = texture.get();
-    const scaledWidth = frame.width * 0.5;
-    const scaledHeight = frame.height * 0.5;
-    // Collider is 70% width, 30% height at the bottom
-    body.setSize(scaledWidth * 0.7, scaledHeight * 0.3);
-    body.setOffset(frame.width * 0.15, frame.height * 0.65);
+    // House sprites are ~192x192, scaled to 0.5 = ~96x96 display size
+    // Collider covers bottom 40% with good width
+    body.setSize(70, 40);
+    body.setOffset(61, 115); // Center horizontally, bottom of sprite
 
     // Set house data
     house.setData('type', 'house');
@@ -2226,6 +2226,7 @@ export class MainScene extends Phaser.Scene {
     this.updateHpBars();
     this.checkStorageRange();
     this.updateBaseRegen(time);
+    this.updateBaseIndicator();
     this.checkWorkbenchRange();
     this.checkPortalRange();
     this.checkFarmRange();
@@ -2353,6 +2354,74 @@ export class MainScene extends Phaser.Scene {
         this.player.clearTint();
       }
     });
+  }
+
+  // Update base direction indicator arrow
+  private updateBaseIndicator(): void {
+    this.baseIndicatorArrow.clear();
+
+    // Check if storage building is visible on screen
+    const camera = this.cameras.main;
+    const storageScreenPos = {
+      x: this.storageBuilding.x - camera.scrollX,
+      y: this.storageBuilding.y - camera.scrollY,
+    };
+
+    // Screen bounds with some margin
+    const margin = 50;
+    const isOnScreen =
+      storageScreenPos.x >= -margin &&
+      storageScreenPos.x <= camera.width + margin &&
+      storageScreenPos.y >= -margin &&
+      storageScreenPos.y <= camera.height + margin;
+
+    if (isOnScreen) {
+      return; // Don't show arrow if base is visible
+    }
+
+    // Calculate direction from player to storage
+    const angle = Phaser.Math.Angle.Between(
+      this.player.x,
+      this.player.y,
+      this.storageBuilding.x,
+      this.storageBuilding.y
+    );
+
+    // Position arrow at screen edge
+    const arrowDistance = 60; // Distance from screen center
+    const screenCenterX = camera.width / 2;
+    const screenCenterY = camera.height / 2;
+
+    // Calculate arrow position at edge of screen
+    const arrowX = screenCenterX + Math.cos(angle) * (Math.min(camera.width, camera.height) / 2 - arrowDistance);
+    const arrowY = screenCenterY + Math.sin(angle) * (Math.min(camera.width, camera.height) / 2 - arrowDistance);
+
+    // Draw arrow pointing to base
+    const arrowSize = 12;
+    const arrowColor = 0xdaa520; // Gold color matching storage
+
+    this.baseIndicatorArrow.fillStyle(arrowColor, 0.8);
+    this.baseIndicatorArrow.lineStyle(2, 0x000000, 0.5);
+
+    // Draw triangle arrow
+    const tipX = arrowX + Math.cos(angle) * arrowSize;
+    const tipY = arrowY + Math.sin(angle) * arrowSize;
+    const leftX = arrowX + Math.cos(angle + 2.5) * arrowSize;
+    const leftY = arrowY + Math.sin(angle + 2.5) * arrowSize;
+    const rightX = arrowX + Math.cos(angle - 2.5) * arrowSize;
+    const rightY = arrowY + Math.sin(angle - 2.5) * arrowSize;
+
+    this.baseIndicatorArrow.beginPath();
+    this.baseIndicatorArrow.moveTo(tipX, tipY);
+    this.baseIndicatorArrow.lineTo(leftX, leftY);
+    this.baseIndicatorArrow.lineTo(rightX, rightY);
+    this.baseIndicatorArrow.closePath();
+    this.baseIndicatorArrow.fillPath();
+    this.baseIndicatorArrow.strokePath();
+
+    // Draw small house icon behind arrow
+    this.baseIndicatorArrow.fillStyle(arrowColor, 0.6);
+    this.baseIndicatorArrow.fillCircle(arrowX - Math.cos(angle) * 8, arrowY - Math.sin(angle) * 8, 6);
   }
 
   private checkWorkbenchRange(): void {
@@ -2710,19 +2779,19 @@ export class MainScene extends Phaser.Scene {
 
   private createFarmCollectEffect(x: number, y: number, resourceType: string): void {
     const colors: Record<string, number> = {
-      scrap: 0x708090,
-      polymer: 0x32cd32,
-      gems: 0x00bfff,
+      scrap: 0xe07050, // Meat color
+      polymer: 0x8B4513, // Wood color
+      gems: 0xFFD700, // Gold color
     };
     const color = colors[resourceType] || 0xffffff;
 
-    // Get resource sprite key based on type
+    // Get resource sprite key based on type (scrap=meat, polymer=wood, gems=gold)
     const resourceSprites: Record<string, string> = {
-      scrap: 'resource_scrap',
-      polymer: 'resource_polymer',
-      gems: 'resource_gems',
+      scrap: 'resource_meat',
+      polymer: 'resource_wood',
+      gems: 'resource_gold',
     };
-    const spriteKey = resourceSprites[resourceType] || 'resource_scrap';
+    const spriteKey = resourceSprites[resourceType] || 'resource_meat';
 
     // Create 3-5 resource sprites that fly to storage
     const resourceCount = Phaser.Math.Between(3, 5);

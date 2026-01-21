@@ -81,27 +81,43 @@ export const WorkbenchPanel: React.FC = () => {
 
   return (
     <>
-      {/* Toggle button when in range */}
+      {/* Backdrop overlay to close on outside tap */}
+      {isOpen && (
+        <div
+          onClick={() => setIsOpen(false)}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 999,
+          }}
+        />
+      )}
+
+      {/* Toggle button when in range - appears at top center */}
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
           style={{
             position: 'fixed',
-            bottom: 100,
+            top: 120, // Below the HUD bars
             left: '50%',
             transform: 'translateX(-50%)',
             backgroundColor: 'rgba(106, 90, 205, 0.9)',
             color: '#fff',
             border: '2px solid #6a5acd',
             borderRadius: '8px',
-            padding: '12px 24px',
-            fontSize: '14px',
+            padding: '10px 20px',
+            fontSize: '12px',
             fontWeight: 'bold',
             cursor: 'pointer',
             zIndex: 1000,
+            boxShadow: '0 0 10px rgba(106, 90, 205, 0.5)',
           }}
         >
-          OPEN WORKBENCH
+          ⚒️ WORKBENCH
         </button>
       )}
 
@@ -165,13 +181,13 @@ export const WorkbenchPanel: React.FC = () => {
             }}
           >
             <div style={{ color: '#8844ff', fontSize: '12px' }}>
-              <span style={{ fontWeight: 'bold' }}>Souls:</span> {resources.souls}
+              <span style={{ fontWeight: 'bold' }}>💀</span> {resources.souls}
             </div>
-            <div style={{ color: '#708090', fontSize: '12px' }}>
-              <span style={{ fontWeight: 'bold' }}>Scrap:</span> {resources.scrap}
+            <div style={{ color: '#e07050', fontSize: '12px' }}>
+              <span style={{ fontWeight: 'bold' }}>🥩</span> {resources.scrap}
             </div>
-            <div style={{ color: '#32cd32', fontSize: '12px' }}>
-              <span style={{ fontWeight: 'bold' }}>Polymer:</span> {resources.polymer}
+            <div style={{ color: '#8B4513', fontSize: '12px' }}>
+              <span style={{ fontWeight: 'bold' }}>🪵</span> {resources.polymer}
             </div>
           </div>
 
@@ -256,11 +272,11 @@ export const WorkbenchPanel: React.FC = () => {
                       HP: {config.health} | DMG: {config.damage} | SPD: {config.moveSpeed}
                     </div>
                     <div style={{ color: '#666', fontSize: '10px', marginTop: '2px' }}>
-                      <span style={{ color: '#8844ff' }}>{config.cost.souls}⬡</span>
+                      <span style={{ color: '#8844ff' }}>💀{config.cost.souls}</span>
                       {' '}
-                      <span style={{ color: '#708090' }}>{config.cost.scrap}⚙</span>
+                      <span style={{ color: '#e07050' }}>🥩{config.cost.scrap}</span>
                       {' '}
-                      <span style={{ color: '#32cd32' }}>{config.cost.polymer}◆</span>
+                      <span style={{ color: '#8B4513' }}>🪵{config.cost.polymer}</span>
                     </div>
                   </div>
 
