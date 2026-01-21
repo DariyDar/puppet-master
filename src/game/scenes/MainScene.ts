@@ -2999,9 +2999,8 @@ export class MainScene extends Phaser.Scene {
   }
 
   private updateShadowPosition(): void {
-    // Shadow follows player position - offset puts shadow at spider's "feet"
-    // Spider sprite is 256x256 scaled to 0.5, so offset of 25 places shadow near ground
-    this.playerShadow.setPosition(this.player.x, this.player.y + 25);
+    // Shadow follows player position - small offset places shadow directly under spider
+    this.playerShadow.setPosition(this.player.x, this.player.y + 10);
   }
 
   private handlePlayerAutoAttack(time: number): void {
