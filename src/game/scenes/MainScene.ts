@@ -1,15 +1,22 @@
 import Phaser from 'phaser';
-import { GAME_CONFIG, UNIT_CONFIGS } from '../config/PhaserConfig';
+import { GAME_CONFIG, UNIT_CONFIGS, ENEMY_CONFIGS, TOWER_CONFIGS, HOUSE_CONFIGS, FARM_CONFIGS } from '../config/PhaserConfig';
+import type { EnemyType, EnemyBehavior, TowerType, HouseType, FarmType } from '../config/PhaserConfig';
 import { gameEvents } from '../managers/EventManager';
+import { questManager } from '../managers/QuestManager';
 import { getSavedUpgrades, getSavedPlayerStats } from '../../stores/gameStore';
 
 type EnemyState = 'idle' | 'chase' | 'attack' | 'flee' | 'dead';
 type UnitState = 'follow' | 'attack' | 'return' | 'dead';
+type StructureState = 'active' | 'destroyed';
 
 // 8 directions for player animations
 type PlayerDirection = 'down' | 'down_right' | 'right' | 'up_right' | 'up' | 'up_left' | 'left' | 'down_left';
 
 export class MainScene extends Phaser.Scene {
+  // Map seed for consistent decoration placement
+  private readonly MAP_SEED: number = 12345; // Fixed seed for consistent map
+  private decorRng!: Phaser.Math.RandomDataGenerator;
+
   // Player
   private player!: Phaser.Physics.Arcade.Sprite;
   private playerShadow!: Phaser.GameObjects.Sprite;
@@ -41,6 +48,13 @@ export class MainScene extends Phaser.Scene {
   private droppedResources!: Phaser.Physics.Arcade.Group;
   private corpses!: Phaser.Physics.Arcade.Group;
   private resourceDeposits!: Phaser.Physics.Arcade.Group;
+  private decorColliders!: Phaser.Physics.Arcade.Group; // Trees and bushes with colliders
+  private towers!: Phaser.Physics.Arcade.Group;
+  private houses!: Phaser.Physics.Arcade.Group;
+
+  // Structure tracking
+  private towerIdCounter: number = 0;
+  private houseIdCounter: number = 0;
 
   // Unit management
   private unitIdCounter: number = 0;
@@ -55,6 +69,13 @@ export class MainScene extends Phaser.Scene {
   private workbenchZone!: Phaser.GameObjects.Zone;
   private isInWorkbenchRange: boolean = false;
 
+  // Farms (Recyclers)
+  private farms: Map<string, Phaser.GameObjects.Sprite> = new Map();
+  private farmZones: Map<string, Phaser.GameObjects.Zone> = new Map();
+  private farmIdCounter: number = 0;
+  private lastFarmUpdate: number = 0;
+  private isNearFarm: boolean = false;
+
   // Soul draining
   private isDrainingSoul: boolean = false;
   private currentDrainTarget: Phaser.Physics.Arcade.Sprite | null = null;
@@ -62,16 +83,28 @@ export class MainScene extends Phaser.Scene {
   private drainProgressBar: Phaser.GameObjects.Graphics | null = null;
   private soulDrainTime: number = GAME_CONFIG.PLAYER_BASE_SOUL_DRAIN_TIME * 1000; // ms
 
-  // Map
-  private mapWidth: number = 1280;
-  private mapHeight: number = 960;
+  // Map - much larger for exploration (3x bigger)
+  private mapWidth: number = 6400;
+  private mapHeight: number = 2400;
 
-  // Base area (safe zone)
-  private baseCenter = { x: 640, y: 480 };
-  private baseRadius = 150;
+  // Zone boundaries
+  private zone1End: number = 3200; // First zone ends here
+  private zone2Start: number = 3200; // Second zone starts here
+
+  // Base area (safe zone) - in zone 1, larger and more spacious
+  private baseCenter = { x: 800, y: 800 };
+  private baseRadius = 250; // 50% bigger base
+
+  // Portals (one in each zone)
+  private portal1!: Phaser.Physics.Arcade.Sprite; // Portal in Zone 1
+  private portal2!: Phaser.Physics.Arcade.Sprite; // Portal in Zone 2
+  private portal1UseText!: Phaser.GameObjects.Text;
+  private portal2UseText!: Phaser.GameObjects.Text;
+  private isNearPortal: boolean = false;
+  private nearPortalId: number = 0; // Which portal player is near (1 or 2)
 
   // Spawn points
-  private spawnPoints: { x: number; y: number; maxEnemies: number; currentEnemies: number; respawnTimer: number }[] = [];
+  private spawnPoints: { x: number; y: number; maxEnemies: number; currentEnemies: number; respawnTimer: number; enemyTypes?: EnemyType[] }[] = [];
   private lastSpawnCheck: number = 0;
   private enemyIdCounter: number = 0;
 
@@ -86,25 +119,40 @@ export class MainScene extends Phaser.Scene {
   }
 
   create(): void {
+    // Initialize seeded RNG for consistent decoration placement
+    this.decorRng = new Phaser.Math.RandomDataGenerator([this.MAP_SEED.toString()]);
+
     // Create spider player animations
     this.createPlayerAnimations();
 
-    // Create simple test map
-    this.createTestMap();
+    // Create effect animations (fire, dust, explosion)
+    this.createEffectAnimations();
 
-    // Create groups
+    // Create groups (MUST be before createTestMap which uses decorColliders)
     this.droppedResources = this.physics.add.group();
     this.corpses = this.physics.add.group();
     this.resourceDeposits = this.physics.add.group();
+    this.enemies = this.physics.add.group({
+      collideWorldBounds: true,
+    });
     this.units = this.physics.add.group({
       collideWorldBounds: true,
     });
+    this.towers = this.physics.add.group();
+    this.houses = this.physics.add.group();
+    this.decorColliders = this.physics.add.group();
+
+    // Create simple test map
+    this.createTestMap();
 
     // Create base buildings
     this.createBaseBuildings();
 
     // Create resource deposits
     this.createResourceDeposits();
+
+    // Create enemy structures (towers and houses)
+    this.createEnemyStructures();
 
     // Create player
     this.createPlayer();
@@ -192,28 +240,28 @@ export class MainScene extends Phaser.Scene {
       this.anims.create({
         key: `spider_attack_${dir}`,
         frames: this.anims.generateFrameNumbers(`spider_attack_${dir}`, { start: 0, end: 19 }),
-        frameRate: frameRate * 1.5, // Attacks are faster
+        frameRate: frameRate * 2, // Attacks are 2x faster
         repeat: 0, // Don't loop
       });
       // Attack shadow
       this.anims.create({
         key: `spider_attack_shadow_${dir}`,
         frames: this.anims.generateFrameNumbers(`spider_attack_shadow_${dir}`, { start: 0, end: 19 }),
-        frameRate: frameRate * 1.5,
+        frameRate: frameRate * 2,
         repeat: 0,
       });
 
-      // Nervous (soul drain) body
+      // Nervous (soul drain) body - only 16 frames (0-15)
       this.anims.create({
         key: `spider_nervous_${dir}`,
-        frames: this.anims.generateFrameNumbers(`spider_nervous_${dir}`, { start: 0, end: 19 }),
+        frames: this.anims.generateFrameNumbers(`spider_nervous_${dir}`, { start: 0, end: 15 }),
         frameRate: frameRate,
         repeat: -1,
       });
       // Nervous shadow
       this.anims.create({
         key: `spider_nervous_shadow_${dir}`,
-        frames: this.anims.generateFrameNumbers(`spider_nervous_shadow_${dir}`, { start: 0, end: 19 }),
+        frames: this.anims.generateFrameNumbers(`spider_nervous_shadow_${dir}`, { start: 0, end: 15 }),
         frameRate: frameRate,
         repeat: -1,
       });
@@ -234,38 +282,659 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
+  private createEffectAnimations(): void {
+    // Fire animations (64x64 frames) - for Monk projectile
+    if (this.textures.exists('effect_fire1')) {
+      const fireTexture = this.textures.get('effect_fire1');
+      const fireFrameCount = fireTexture.frameTotal - 1;
+      this.anims.create({
+        key: 'fire_anim',
+        frames: this.anims.generateFrameNumbers('effect_fire1', { start: 0, end: Math.max(0, fireFrameCount - 1) }),
+        frameRate: 10,
+        repeat: -1
+      });
+    }
+
+    // Explosion animations (192x192 frames)
+    if (this.textures.exists('effect_explosion1')) {
+      const explosionTexture = this.textures.get('effect_explosion1');
+      const explosionFrameCount = explosionTexture.frameTotal - 1;
+      this.anims.create({
+        key: 'explosion_anim',
+        frames: this.anims.generateFrameNumbers('effect_explosion1', { start: 0, end: Math.max(0, explosionFrameCount - 1) }),
+        frameRate: 12,
+        repeat: 0
+      });
+    }
+
+    // Dust animations (64x64 frames)
+    if (this.textures.exists('effect_dust1')) {
+      const dustTexture = this.textures.get('effect_dust1');
+      const dustFrameCount = dustTexture.frameTotal - 1;
+      this.anims.create({
+        key: 'dust_anim',
+        frames: this.anims.generateFrameNumbers('effect_dust1', { start: 0, end: Math.max(0, dustFrameCount - 1) }),
+        frameRate: 10,
+        repeat: 0
+      });
+    }
+
+    // Water foam animation (192x192 frames, 16 frames)
+    if (this.textures.exists('water_foam')) {
+      const foamTexture = this.textures.get('water_foam');
+      const foamFrameCount = Math.max(1, foamTexture.frameTotal - 1);
+      this.anims.create({
+        key: 'foam_anim',
+        frames: this.anims.generateFrameNumbers('water_foam', { start: 0, end: Math.max(0, foamFrameCount - 1) }),
+        frameRate: 8,
+        repeat: -1
+      });
+    }
+
+    // Sheep idle animation (128x128 frames, 6 frames)
+    if (this.textures.exists('deposit_sheep')) {
+      const sheepTexture = this.textures.get('deposit_sheep');
+      const sheepFrameCount = sheepTexture.frameTotal - 1;
+      this.anims.create({
+        key: 'sheep_idle_anim',
+        frames: this.anims.generateFrameNumbers('deposit_sheep', { start: 0, end: Math.max(0, sheepFrameCount - 1) }),
+        frameRate: 6,
+        repeat: -1
+      });
+    }
+
+    // Dead knight corpse animation (128x128 frames) - for enemy corpses
+    if (this.textures.exists('enemy_dead')) {
+      const deadTexture = this.textures.get('enemy_dead');
+      const deadFrameCount = Math.max(1, deadTexture.frameTotal - 1);
+      this.anims.create({
+        key: 'enemy_dead_anim',
+        frames: this.anims.generateFrameNumbers('enemy_dead', { start: 0, end: Math.max(0, deadFrameCount - 1) }),
+        frameRate: 8,
+        repeat: -1
+      });
+    }
+
+    // Skull idle animation (192x192 frames) - for soul pickups
+    if (this.textures.exists('skull_idle')) {
+      const skullTexture = this.textures.get('skull_idle');
+      const skullFrameCount = Math.max(1, skullTexture.frameTotal - 1);
+      this.anims.create({
+        key: 'skull_idle_anim',
+        frames: this.anims.generateFrameNumbers('skull_idle', { start: 0, end: Math.max(0, skullFrameCount - 1) }),
+        frameRate: 8,
+        repeat: -1
+      });
+    }
+  }
+
   private createTestMap(): void {
-    // Create a simple tiled background
-    const tileSize = GAME_CONFIG.TILE_SIZE;
-    const tilesX = Math.ceil(this.mapWidth / tileSize);
-    const tilesY = Math.ceil(this.mapHeight / tileSize);
+    // Simple solid color background for each zone
+    // Zone 1: Forest green, Zone 2: Sandy yellow-green
+    const zone1Color = 0x4a7c3f;
+    const zone2Color = 0x7a8b4a;
 
-    for (let y = 0; y < tilesY; y++) {
-      for (let x = 0; x < tilesX; x++) {
-        const tile = this.add.rectangle(
-          x * tileSize + tileSize / 2,
-          y * tileSize + tileSize / 2,
-          tileSize - 1,
-          tileSize - 1,
-          0x1a1a2e
-        );
+    // Create background rectangles for each zone
+    const zone1Bg = this.add.rectangle(
+      this.zone1End / 2,
+      this.mapHeight / 2,
+      this.zone1End,
+      this.mapHeight,
+      zone1Color
+    );
+    zone1Bg.setDepth(-20);
 
-        // Add some variation
-        if (Math.random() > 0.9) {
-          tile.setFillStyle(0x252540);
+    const zone2Bg = this.add.rectangle(
+      this.zone1End + (this.mapWidth - this.zone1End) / 2,
+      this.mapHeight / 2,
+      this.mapWidth - this.zone1End,
+      this.mapHeight,
+      zone2Color
+    );
+    zone2Bg.setDepth(-20);
+
+    // Add subtle texture variation using graphics
+    const textureGraphics = this.add.graphics();
+    textureGraphics.setDepth(-19);
+
+    // Add random grass patches for visual interest
+    for (let i = 0; i < 300; i++) {
+      const x = Phaser.Math.Between(50, this.mapWidth - 50);
+      const y = Phaser.Math.Between(50, this.mapHeight - 50);
+      const isZone2 = x > this.zone1End;
+
+      // Slightly different shade for variation
+      const baseColor = isZone2 ? zone2Color : zone1Color;
+      const variation = Phaser.Math.Between(-15, 15);
+      const r = Math.min(255, Math.max(0, ((baseColor >> 16) & 0xff) + variation));
+      const g = Math.min(255, Math.max(0, ((baseColor >> 8) & 0xff) + variation));
+      const b = Math.min(255, Math.max(0, (baseColor & 0xff) + variation));
+      const varColor = (r << 16) | (g << 8) | b;
+
+      textureGraphics.fillStyle(varColor, 0.4);
+      textureGraphics.fillCircle(x, y, Phaser.Math.Between(30, 80));
+    }
+
+    // Zone labels
+    const zone1Label = this.add.text(640, 50, 'ZONE 1 - Starting Area', {
+      fontFamily: 'Arial',
+      fontSize: '16px',
+      color: '#4a9f4a',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    zone1Label.setOrigin(0.5);
+    zone1Label.setDepth(1);
+    zone1Label.setScrollFactor(0); // Fixed to camera
+
+    const zone2Label = this.add.text(1920, 50, 'ZONE 2 - Danger Zone', {
+      fontFamily: 'Arial',
+      fontSize: '16px',
+      color: '#ff4444',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    zone2Label.setOrigin(0.5);
+    zone2Label.setDepth(1);
+
+    // Set world bounds (80px margin for water border)
+    const margin = 80;
+    this.physics.world.setBounds(margin, margin, this.mapWidth - margin * 2, this.mapHeight - margin * 2);
+
+    // Add decorations
+    this.createDecorations();
+
+    // Create portal at edge of zone 1
+    this.createPortal();
+  }
+
+  private createDecorations(): void {
+    // Water border (island edge)
+    this.createWaterBorder();
+
+    // Decorations (trees, bushes, rocks, stumps) disabled for now
+    // TODO: Re-enable when decoration system is properly designed
+
+    // Add floating clouds
+    this.createClouds();
+  }
+
+  private createClouds(): void {
+    // Use all 8 cloud types
+    const cloudTypes = [
+      'decor_cloud1', 'decor_cloud2', 'decor_cloud3', 'decor_cloud4',
+      'decor_cloud5', 'decor_cloud6', 'decor_cloud7', 'decor_cloud8'
+    ];
+
+    // Check which cloud textures exist
+    const availableClouds = cloudTypes.filter(type => this.textures.exists(type));
+    if (availableClouds.length === 0) return;
+
+    // Create 8-12 clouds that float across the map (use seeded RNG for initial positions)
+    const cloudCount = 8 + this.decorRng.integerInRange(0, 4);
+
+    for (let i = 0; i < cloudCount; i++) {
+      const x = this.decorRng.integerInRange(-200, this.mapWidth + 200);
+      const y = this.decorRng.integerInRange(100, this.mapHeight - 100);
+
+      // Use different cloud types
+      const cloudType = availableClouds[this.decorRng.integerInRange(0, availableClouds.length - 1)];
+      const cloud = this.add.image(x, y, cloudType);
+      cloud.setScale(0.5 + this.decorRng.frac() * 0.5);
+      cloud.setAlpha(0.3 + this.decorRng.frac() * 0.3);
+      cloud.setDepth(1000); // Above everything
+
+      // Slow horizontal drift
+      const speed = 10 + this.decorRng.frac() * 20;
+      const direction = this.decorRng.frac() > 0.5 ? 1 : -1;
+
+      this.tweens.add({
+        targets: cloud,
+        x: cloud.x + direction * (this.mapWidth + 400),
+        duration: (this.mapWidth + 400) / speed * 1000,
+        repeat: -1,
+        onRepeat: () => {
+          cloud.x = direction > 0 ? -200 : this.mapWidth + 200;
+          cloud.y = Phaser.Math.Between(100, this.mapHeight - 100);
+          // Change cloud type on repeat for variety
+          const newType = availableClouds[Phaser.Math.Between(0, availableClouds.length - 1)];
+          cloud.setTexture(newType);
+        }
+      });
+    }
+  }
+
+  private createWaterBorder(): void {
+    const waterMargin = 80; // Width of water border around island
+    const tileSize = 64;
+
+    // Water depth should be above terrain (-20) but below everything else
+    const waterDepth = -15;
+    const foamDepth = -14;
+
+    // Create water background around the entire island perimeter
+    // This creates a frame of water around the playable area
+
+    // Top water strip (full width)
+    for (let x = -tileSize; x < this.mapWidth + tileSize; x += tileSize) {
+      for (let y = -tileSize; y < waterMargin; y += tileSize) {
+        if (this.textures.exists('water_background')) {
+          const water = this.add.image(x, y, 'water_background');
+          water.setDepth(waterDepth);
         }
       }
     }
 
-    // Add border walls
-    const wallColor = 0x4a4a6a;
-    this.add.rectangle(this.mapWidth / 2, tileSize / 2, this.mapWidth, tileSize, wallColor);
-    this.add.rectangle(this.mapWidth / 2, this.mapHeight - tileSize / 2, this.mapWidth, tileSize, wallColor);
-    this.add.rectangle(tileSize / 2, this.mapHeight / 2, tileSize, this.mapHeight, wallColor);
-    this.add.rectangle(this.mapWidth - tileSize / 2, this.mapHeight / 2, tileSize, this.mapHeight, wallColor);
+    // Bottom water strip (full width)
+    for (let x = -tileSize; x < this.mapWidth + tileSize; x += tileSize) {
+      for (let y = this.mapHeight - waterMargin; y < this.mapHeight + tileSize; y += tileSize) {
+        if (this.textures.exists('water_background')) {
+          const water = this.add.image(x, y, 'water_background');
+          water.setDepth(waterDepth);
+        }
+      }
+    }
 
-    // Set world bounds
-    this.physics.world.setBounds(tileSize, tileSize, this.mapWidth - tileSize * 2, this.mapHeight - tileSize * 2);
+    // Left water strip
+    for (let x = -tileSize; x < waterMargin; x += tileSize) {
+      for (let y = waterMargin; y < this.mapHeight - waterMargin; y += tileSize) {
+        if (this.textures.exists('water_background')) {
+          const water = this.add.image(x, y, 'water_background');
+          water.setDepth(waterDepth);
+        }
+      }
+    }
+
+    // Right water strip
+    for (let x = this.mapWidth - waterMargin; x < this.mapWidth + tileSize; x += tileSize) {
+      for (let y = waterMargin; y < this.mapHeight - waterMargin; y += tileSize) {
+        if (this.textures.exists('water_background')) {
+          const water = this.add.image(x, y, 'water_background');
+          water.setDepth(waterDepth);
+        }
+      }
+    }
+
+    // Add animated foam along the shoreline (inner edge of water)
+    // Create continuous foam line with overlapping sprites
+    if (this.textures.exists('water_foam') && this.anims.exists('foam_anim')) {
+      const foamScale = 0.4;
+      // Foam texture is 192x192, scaled to ~77px. Spacing of 50 creates overlap
+      const foamSpacing = 50;
+
+      // Top foam line
+      for (let x = waterMargin - 20; x < this.mapWidth - waterMargin + 20; x += foamSpacing) {
+        const foam = this.add.sprite(x, waterMargin, 'water_foam');
+        foam.setScale(foamScale);
+        foam.setDepth(foamDepth);
+        foam.setAlpha(0.85);
+        foam.play('foam_anim');
+      }
+
+      // Bottom foam line
+      for (let x = waterMargin - 20; x < this.mapWidth - waterMargin + 20; x += foamSpacing) {
+        const foam = this.add.sprite(x, this.mapHeight - waterMargin, 'water_foam');
+        foam.setScale(foamScale);
+        foam.setDepth(foamDepth);
+        foam.setAlpha(0.85);
+        foam.setFlipY(true);
+        foam.play('foam_anim');
+      }
+
+      // Left foam line
+      for (let y = waterMargin - 20; y < this.mapHeight - waterMargin + 20; y += foamSpacing) {
+        const foam = this.add.sprite(waterMargin, y, 'water_foam');
+        foam.setScale(foamScale);
+        foam.setDepth(foamDepth);
+        foam.setAlpha(0.85);
+        foam.setAngle(-90);
+        foam.play('foam_anim');
+      }
+
+      // Right foam line
+      for (let y = waterMargin - 20; y < this.mapHeight - waterMargin + 20; y += foamSpacing) {
+        const foam = this.add.sprite(this.mapWidth - waterMargin, y, 'water_foam');
+        foam.setScale(foamScale);
+        foam.setDepth(foamDepth);
+        foam.setAlpha(0.85);
+        foam.setAngle(90);
+        foam.play('foam_anim');
+      }
+
+      // Corner foam pieces for seamless connection
+      // Top-left corner
+      const tlFoam = this.add.sprite(waterMargin, waterMargin, 'water_foam');
+      tlFoam.setScale(foamScale);
+      tlFoam.setDepth(foamDepth);
+      tlFoam.setAlpha(0.85);
+      tlFoam.setAngle(-45);
+      tlFoam.play('foam_anim');
+
+      // Top-right corner
+      const trFoam = this.add.sprite(this.mapWidth - waterMargin, waterMargin, 'water_foam');
+      trFoam.setScale(foamScale);
+      trFoam.setDepth(foamDepth);
+      trFoam.setAlpha(0.85);
+      trFoam.setAngle(45);
+      trFoam.play('foam_anim');
+
+      // Bottom-left corner
+      const blFoam = this.add.sprite(waterMargin, this.mapHeight - waterMargin, 'water_foam');
+      blFoam.setScale(foamScale);
+      blFoam.setDepth(foamDepth);
+      blFoam.setAlpha(0.85);
+      blFoam.setAngle(-135);
+      blFoam.play('foam_anim');
+
+      // Bottom-right corner
+      const brFoam = this.add.sprite(this.mapWidth - waterMargin, this.mapHeight - waterMargin, 'water_foam');
+      brFoam.setScale(foamScale);
+      brFoam.setDepth(foamDepth);
+      brFoam.setAlpha(0.85);
+      brFoam.setAngle(135);
+      brFoam.play('foam_anim');
+    }
+
+    // Add water rocks scattered in the water border
+    this.createWaterRocks(waterMargin, waterDepth);
+  }
+
+  private createWaterRocks(waterMargin: number, waterDepth: number): void {
+    const waterRockTypes = ['water_rock1', 'water_rock2', 'water_rock3', 'water_rock4'];
+    const availableRocks = waterRockTypes.filter(type => this.textures.exists(type));
+    if (availableRocks.length === 0) return;
+
+    // Place 15-25 water rocks around the water border
+    const rockCount = 15 + this.decorRng.integerInRange(0, 10);
+
+    for (let i = 0; i < rockCount; i++) {
+      // Randomly choose a side (0: top, 1: bottom, 2: left, 3: right)
+      const side = this.decorRng.integerInRange(0, 3);
+      let x: number, y: number;
+
+      switch (side) {
+        case 0: // Top
+          x = this.decorRng.integerInRange(20, this.mapWidth - 20);
+          y = this.decorRng.integerInRange(10, waterMargin - 10);
+          break;
+        case 1: // Bottom
+          x = this.decorRng.integerInRange(20, this.mapWidth - 20);
+          y = this.decorRng.integerInRange(this.mapHeight - waterMargin + 10, this.mapHeight - 10);
+          break;
+        case 2: // Left
+          x = this.decorRng.integerInRange(10, waterMargin - 10);
+          y = this.decorRng.integerInRange(waterMargin, this.mapHeight - waterMargin);
+          break;
+        case 3: // Right
+        default:
+          x = this.decorRng.integerInRange(this.mapWidth - waterMargin + 10, this.mapWidth - 10);
+          y = this.decorRng.integerInRange(waterMargin, this.mapHeight - waterMargin);
+          break;
+      }
+
+      const rockType = availableRocks[this.decorRng.integerInRange(0, availableRocks.length - 1)];
+      const rock = this.add.image(x, y, rockType);
+      rock.setScale(0.3 + this.decorRng.frac() * 0.25);
+      rock.setDepth(waterDepth + 1); // Just above water
+      rock.setAlpha(0.95);
+
+      // Add gentle bobbing animation (like floating)
+      this.tweens.add({
+        targets: rock,
+        y: rock.y + 3,
+        duration: 1500 + this.decorRng.integerInRange(0, 500),
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.easeInOut',
+        delay: this.decorRng.integerInRange(0, 1500),
+      });
+    }
+  }
+
+  private placeRandomDecor(config: {
+    zone: number;
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    decorTypes: {
+      bushes: string[];
+      trees: string[];
+      rocks: string[];
+      stumps: string[];
+    };
+    transitionZoneStart?: number;
+    transitionZoneEnd?: number;
+  }): void {
+    const { minX, maxX, minY, maxY, decorTypes, transitionZoneStart, transitionZoneEnd, zone } = config;
+
+    // Exclude safe zones (base area for zone 1)
+    const excludeZones = zone === 1 ? [
+      { x: 800, y: 800, radius: 400 }, // Base area - larger exclusion
+    ] : [];
+
+    // Helper to check if position is valid
+    const isValidPosition = (x: number, y: number): boolean => {
+      for (const ez of excludeZones) {
+        const dist = Phaser.Math.Distance.Between(x, y, ez.x, ez.y);
+        if (dist < ez.radius) return false;
+      }
+      // Don't place in water margin
+      if (x < 100 || x > this.mapWidth - 100 || y < 100 || y > this.mapHeight - 100) return false;
+      return true;
+    };
+
+    // Use seeded RNG for consistent decoration placement
+    // Bushes - 15-25 per zone
+    const bushCount = 15 + this.decorRng.integerInRange(0, 10);
+    for (let i = 0; i < bushCount; i++) {
+      const x = minX + this.decorRng.frac() * (maxX - minX);
+      const y = minY + this.decorRng.frac() * (maxY - minY);
+
+      if (isValidPosition(x, y)) {
+        const bushType = decorTypes.bushes[this.decorRng.integerInRange(0, decorTypes.bushes.length - 1)];
+        if (this.textures.exists(bushType)) {
+          const bush = this.add.image(x, y, bushType);
+          bush.setScale(0.3 + this.decorRng.frac() * 0.2);
+          bush.setDepth(y);
+
+          // In transition zone, fade out
+          if (transitionZoneStart && x > transitionZoneStart) {
+            bush.setAlpha(1 - (x - transitionZoneStart) / 400);
+          }
+          if (transitionZoneEnd && x < transitionZoneEnd) {
+            bush.setAlpha((x - minX) / 400);
+          }
+
+          // Add gentle swaying animation (wind effect)
+          this.tweens.add({
+            targets: bush,
+            angle: { from: -2, to: 2 },
+            duration: 2000 + this.decorRng.integerInRange(0, 1000),
+            yoyo: true,
+            repeat: -1,
+            ease: 'Sine.easeInOut',
+            delay: this.decorRng.integerInRange(0, 2000),
+          });
+        }
+      }
+    }
+
+    // Trees - 20-35 per zone, scattered
+    const treeCount = 20 + this.decorRng.integerInRange(0, 15);
+    for (let i = 0; i < treeCount; i++) {
+      const x = minX + this.decorRng.frac() * (maxX - minX);
+      const y = minY + this.decorRng.frac() * (maxY - minY);
+
+      if (isValidPosition(x, y)) {
+        const treeType = decorTypes.trees[this.decorRng.integerInRange(0, decorTypes.trees.length - 1)];
+        if (this.textures.exists(treeType)) {
+          const treeScale = 0.35 + this.decorRng.frac() * 0.25;
+          const tree = this.add.image(x, y, treeType);
+          tree.setScale(treeScale);
+          tree.setDepth(y);
+          // Set origin to bottom for realistic swaying
+          tree.setOrigin(0.5, 1);
+
+          // Add gentle swaying animation (wind effect) - trees sway slower
+          this.tweens.add({
+            targets: tree,
+            angle: { from: -1.5, to: 1.5 },
+            duration: 3000 + this.decorRng.integerInRange(0, 1500),
+            yoyo: true,
+            repeat: -1,
+            ease: 'Sine.easeInOut',
+            delay: this.decorRng.integerInRange(0, 3000),
+          });
+
+          // Add small circular collider at tree base (trunk)
+          const collider = this.physics.add.sprite(x, y, 'portal_placeholder');
+          collider.setVisible(false);
+          collider.setImmovable(true);
+          const colliderBody = collider.body as Phaser.Physics.Arcade.Body;
+          colliderBody.setCircle(12); // Small circular collider
+          colliderBody.setOffset(-12, -12);
+          colliderBody.setImmovable(true);
+          colliderBody.moves = false;
+          this.decorColliders.add(collider);
+        }
+      }
+    }
+
+    // Rocks - 12-20 per zone
+    const rockCount = 12 + this.decorRng.integerInRange(0, 8);
+    for (let i = 0; i < rockCount; i++) {
+      const x = minX + this.decorRng.frac() * (maxX - minX);
+      const y = minY + this.decorRng.frac() * (maxY - minY);
+
+      if (isValidPosition(x, y)) {
+        const rockType = decorTypes.rocks[this.decorRng.integerInRange(0, decorTypes.rocks.length - 1)];
+        if (this.textures.exists(rockType)) {
+          const rockScale = 0.25 + this.decorRng.frac() * 0.2;
+          const rock = this.add.image(x, y, rockType);
+          rock.setScale(rockScale);
+          rock.setDepth(y - 10);
+
+          // Add small circular collider for rocks
+          const collider = this.physics.add.sprite(x, y, 'portal_placeholder');
+          collider.setVisible(false);
+          collider.setImmovable(true);
+          const colliderBody = collider.body as Phaser.Physics.Arcade.Body;
+          colliderBody.setCircle(8 * rockScale / 0.25); // Scale collider with rock size
+          colliderBody.setOffset(-8 * rockScale / 0.25, -8 * rockScale / 0.25);
+          colliderBody.setImmovable(true);
+          colliderBody.moves = false;
+          this.decorColliders.add(collider);
+        }
+      }
+    }
+
+    // Stumps - 8-15 per zone
+    const stumpCount = 8 + this.decorRng.integerInRange(0, 7);
+    for (let i = 0; i < stumpCount; i++) {
+      const x = minX + this.decorRng.frac() * (maxX - minX);
+      const y = minY + this.decorRng.frac() * (maxY - minY);
+
+      if (isValidPosition(x, y)) {
+        const stumpType = decorTypes.stumps[this.decorRng.integerInRange(0, decorTypes.stumps.length - 1)];
+        if (this.textures.exists(stumpType)) {
+          const stump = this.add.image(x, y, stumpType);
+          stump.setScale(0.3 + this.decorRng.frac() * 0.15);
+          stump.setDepth(y - 5);
+
+          // Add small circular collider for stumps
+          const collider = this.physics.add.sprite(x, y, 'portal_placeholder');
+          collider.setVisible(false);
+          collider.setImmovable(true);
+          const colliderBody = collider.body as Phaser.Physics.Arcade.Body;
+          colliderBody.setCircle(10);
+          colliderBody.setOffset(-10, -10);
+          colliderBody.setImmovable(true);
+          colliderBody.moves = false;
+          this.decorColliders.add(collider);
+        }
+      }
+    }
+  }
+
+  private createPortal(): void {
+    // Portal 1 - in Zone 1, leads to Zone 2
+    const portal1X = this.zone1End - 100;
+    const portal1Y = this.mapHeight / 2;
+    this.createSinglePortal(portal1X, portal1Y, 1, 'PORTAL TO ZONE 2');
+
+    // Portal 2 - in Zone 2, leads back to Zone 1
+    const portal2X = this.zone2Start + 100;
+    const portal2Y = this.mapHeight / 2;
+    this.createSinglePortal(portal2X, portal2Y, 2, 'PORTAL TO BASE');
+  }
+
+  private createSinglePortal(x: number, y: number, portalId: number, labelText: string): void {
+    const portal = this.physics.add.sprite(x, y, 'portal_placeholder');
+    portal.setTint(portalId === 1 ? 0x9400d3 : 0x00ff88); // Purple for zone 2, green for base
+    portal.setDepth(4);
+    portal.setImmovable(true);
+    portal.setData('portalId', portalId);
+
+    const body = portal.body as Phaser.Physics.Arcade.Body;
+    body.setImmovable(true);
+    body.moves = false;
+
+    // Portal zone for interaction
+    const zone = this.add.zone(x, y, 80, 80);
+    this.physics.add.existing(zone);
+    (zone.body as Phaser.Physics.Arcade.Body).setAllowGravity(false);
+    (zone.body as Phaser.Physics.Arcade.Body).moves = false;
+    zone.setData('portalId', portalId);
+
+    // Portal glow effect
+    const portalGlow = this.add.graphics();
+    portalGlow.fillStyle(portalId === 1 ? 0x9400d3 : 0x00ff88, 0.3);
+    portalGlow.fillCircle(x, y, 50);
+    portalGlow.setDepth(3);
+
+    // Animate portal glow
+    this.tweens.add({
+      targets: portalGlow,
+      alpha: 0.1,
+      duration: 1000,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+
+    // Portal label
+    const portalLabel = this.add.text(x, y - 50, labelText, {
+      fontFamily: 'Arial',
+      fontSize: '10px',
+      color: portalId === 1 ? '#cc66ff' : '#66ffaa',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    portalLabel.setOrigin(0.5);
+    portalLabel.setDepth(5);
+
+    // Instructions text (hidden initially)
+    const useText = this.add.text(x, y + 50, '[SPACE] to teleport', {
+      fontFamily: 'Arial',
+      fontSize: '10px',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    useText.setOrigin(0.5);
+    useText.setDepth(5);
+    useText.setVisible(false);
+
+    // Store references (zone is created but not stored - using distance check instead)
+    void zone; // Avoid unused variable warning
+    if (portalId === 1) {
+      this.portal1 = portal;
+      this.portal1UseText = useText;
+    } else {
+      this.portal2 = portal;
+      this.portal2UseText = useText;
+    }
   }
 
   private createBaseBuildings(): void {
@@ -277,10 +946,10 @@ export class MainScene extends Phaser.Scene {
     baseGraphics.fillCircle(this.baseCenter.x, this.baseCenter.y, this.baseRadius);
     baseGraphics.setDepth(0);
 
-    // Create Storage building
+    // Create Storage building - centered near top of base
     this.storageBuilding = this.add.sprite(
       this.baseCenter.x,
-      this.baseCenter.y - 40,
+      this.baseCenter.y - 100,
       'storage_placeholder'
     );
     this.storageBuilding.setDepth(4);
@@ -323,10 +992,10 @@ export class MainScene extends Phaser.Scene {
     storageLabel.setOrigin(0.5);
     storageLabel.setDepth(4);
 
-    // Create Workbench building
+    // Create Workbench building - right side of base
     this.workbenchBuilding = this.add.sprite(
-      this.baseCenter.x + 80,
-      this.baseCenter.y + 30,
+      this.baseCenter.x + 140,
+      this.baseCenter.y + 40,
       'workbench_placeholder'
     );
     this.workbenchBuilding.setDepth(4);
@@ -368,26 +1037,166 @@ export class MainScene extends Phaser.Scene {
     );
     workbenchLabel.setOrigin(0.5);
     workbenchLabel.setDepth(4);
+
+    // Create Farms (Recyclers) on base - spread around the perimeter
+    this.createFarm(this.baseCenter.x - 140, this.baseCenter.y + 60, 'scrap_recycler');
+    this.createFarm(this.baseCenter.x - 140, this.baseCenter.y - 60, 'polymer_recycler');
+    this.createFarm(this.baseCenter.x + 140, this.baseCenter.y + 140, 'gem_refinery');
+  }
+
+  private createFarm(x: number, y: number, farmType: FarmType): void {
+    const config = FARM_CONFIGS[farmType];
+    const farmId = `farm_${this.farmIdCounter++}`;
+
+    // Create farm sprite (use a tinted workbench placeholder for now)
+    const farm = this.add.sprite(x, y, 'workbench_placeholder');
+    farm.setScale(0.6);
+    farm.setDepth(4);
+
+    // Color based on resource type
+    const tintColors: Record<string, number> = {
+      scrap: 0x708090, // Gray for scrap
+      polymer: 0x32cd32, // Green for polymer
+      gems: 0x00bfff, // Blue for gems
+    };
+    farm.setTint(tintColors[config.resourceType] || 0xffffff);
+
+    // Set farm data
+    farm.setData('type', 'farm');
+    farm.setData('id', farmId);
+    farm.setData('farmType', farmType);
+    farm.setData('level', 1);
+    farm.setData('storedResources', 0);
+    farm.setData('lastProductionTime', this.time.now);
+
+    // Calculate current stats based on level
+    const level = 1;
+    const productionRate = config.baseProductionRate * config.productionMultipliers[level - 1];
+    const capacity = config.baseCapacity * config.capacityMultipliers[level - 1];
+
+    farm.setData('productionRate', productionRate);
+    farm.setData('capacity', capacity);
+
+    // Farm interaction zone
+    const zone = this.add.zone(x, y, GAME_CONFIG.FARM_INTERACT_RADIUS * 2, GAME_CONFIG.FARM_INTERACT_RADIUS * 2);
+    this.physics.add.existing(zone);
+    (zone.body as Phaser.Physics.Arcade.Body).setAllowGravity(false);
+    (zone.body as Phaser.Physics.Arcade.Body).moves = false;
+    zone.setData('farmId', farmId);
+
+    // Farm range indicator
+    const farmRangeGraphics = this.add.graphics();
+    farmRangeGraphics.lineStyle(1, tintColors[config.resourceType], 0.3);
+    farmRangeGraphics.strokeCircle(x, y, GAME_CONFIG.FARM_INTERACT_RADIUS);
+    farmRangeGraphics.setDepth(1);
+
+    // Add label with name and resource type icon
+    const farmLabel = this.add.text(x, y - 30, config.name, {
+      fontFamily: 'Arial',
+      fontSize: '9px',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    farmLabel.setOrigin(0.5);
+    farmLabel.setDepth(4);
+
+    // Add stored resources text (below the farm)
+    const resourceText = this.add.text(x, y + 30, '0 / ' + capacity, {
+      fontFamily: 'Arial',
+      fontSize: '8px',
+      color: '#aaffaa',
+      stroke: '#000000',
+      strokeThickness: 1,
+    });
+    resourceText.setOrigin(0.5);
+    resourceText.setDepth(4);
+    farm.setData('resourceText', resourceText);
+
+    // Store references
+    this.farms.set(farmId, farm);
+    this.farmZones.set(farmId, zone);
   }
 
   private createResourceDeposits(): void {
-    // Define deposit locations - spread around the map
+    // Generate random deposit locations with some variance
+    const addNoise = (base: number, range: number) => base + Phaser.Math.Between(-range, range);
+
     const depositData = [
-      // Scrap piles (common)
-      { x: 150, y: 300, type: 'scrap', health: 50, resourceAmount: 20 },
-      { x: 1100, y: 400, type: 'scrap', health: 50, resourceAmount: 20 },
-      { x: 300, y: 800, type: 'scrap', health: 50, resourceAmount: 20 },
-      { x: 950, y: 700, type: 'scrap', health: 50, resourceAmount: 20 },
-      // Polymer nodes (uncommon)
-      { x: 250, y: 150, type: 'polymer', health: 80, resourceAmount: 12 },
-      { x: 1050, y: 850, type: 'polymer', health: 80, resourceAmount: 12 },
-      // Gem clusters (rare)
-      { x: 100, y: 850, type: 'gems', health: 120, resourceAmount: 5 },
+      // ===== ZONE 1 (0-3200) =====
+      // Scrap (sheep) - near base, randomized positions
+      { x: addNoise(550, 80), y: addNoise(550, 80), type: 'scrap', health: 50, resourceAmount: 20 },
+      { x: addNoise(1050, 100), y: addNoise(480, 80), type: 'scrap', health: 50, resourceAmount: 20 },
+      { x: addNoise(480, 80), y: addNoise(1150, 100), type: 'scrap', health: 50, resourceAmount: 20 },
+      { x: addNoise(1150, 100), y: addNoise(1080, 100), type: 'scrap', health: 50, resourceAmount: 20 },
+      // Scrap further out
+      { x: addNoise(1750, 120), y: addNoise(450, 100), type: 'scrap', health: 60, resourceAmount: 25 },
+      { x: addNoise(2250, 120), y: addNoise(650, 120), type: 'scrap', health: 60, resourceAmount: 25 },
+      { x: addNoise(1680, 120), y: addNoise(1550, 120), type: 'scrap', health: 60, resourceAmount: 25 },
+      { x: addNoise(2350, 120), y: addNoise(1750, 100), type: 'scrap', health: 60, resourceAmount: 25 },
+      // Polymer (trees) - Zone 1
+      { x: addNoise(450, 100), y: addNoise(1750, 100), type: 'polymer', health: 80, resourceAmount: 12 },
+      { x: addNoise(1550, 120), y: addNoise(350, 80), type: 'polymer', health: 80, resourceAmount: 12 },
+      { x: addNoise(2550, 150), y: addNoise(1050, 150), type: 'polymer', health: 80, resourceAmount: 15 },
+      { x: addNoise(2850, 120), y: addNoise(1650, 120), type: 'polymer', health: 80, resourceAmount: 15 },
+      // Gem (gold mine) - Zone 1 edges
+      { x: addNoise(250, 80), y: addNoise(1950, 80), type: 'gems', health: 120, resourceAmount: 5 },
+      { x: addNoise(2950, 100), y: addNoise(450, 100), type: 'gems', health: 120, resourceAmount: 6 },
+
+      // ===== ZONE 2 (3200-6400) =====
+      // Scrap (sheep) - more valuable, random spread
+      { x: addNoise(3650, 150), y: addNoise(550, 150), type: 'scrap', health: 70, resourceAmount: 30 },
+      { x: addNoise(4250, 150), y: addNoise(750, 150), type: 'scrap', health: 70, resourceAmount: 30 },
+      { x: addNoise(4850, 150), y: addNoise(450, 150), type: 'scrap', health: 70, resourceAmount: 30 },
+      { x: addNoise(5350, 150), y: addNoise(850, 150), type: 'scrap', health: 70, resourceAmount: 30 },
+      { x: addNoise(3700, 150), y: addNoise(1550, 150), type: 'scrap', health: 70, resourceAmount: 30 },
+      { x: addNoise(4300, 150), y: addNoise(1750, 150), type: 'scrap', health: 70, resourceAmount: 30 },
+      { x: addNoise(4750, 150), y: addNoise(1650, 150), type: 'scrap', health: 70, resourceAmount: 30 },
+      { x: addNoise(5450, 150), y: addNoise(1850, 150), type: 'scrap', health: 70, resourceAmount: 30 },
+      // Polymer (trees) - Zone 2, scattered
+      { x: addNoise(3850, 180), y: addNoise(450, 150), type: 'polymer', health: 100, resourceAmount: 18 },
+      { x: addNoise(4550, 180), y: addNoise(650, 180), type: 'polymer', health: 100, resourceAmount: 18 },
+      { x: addNoise(5050, 180), y: addNoise(350, 150), type: 'polymer', health: 100, resourceAmount: 18 },
+      { x: addNoise(3950, 180), y: addNoise(1350, 180), type: 'polymer', health: 100, resourceAmount: 18 },
+      { x: addNoise(4450, 180), y: addNoise(1150, 180), type: 'polymer', health: 100, resourceAmount: 18 },
+      { x: addNoise(5150, 180), y: addNoise(1450, 180), type: 'polymer', health: 100, resourceAmount: 18 },
+      { x: addNoise(5650, 180), y: addNoise(1050, 180), type: 'polymer', health: 100, resourceAmount: 20 },
+      // Gem (gold mine) - Zone 2
+      { x: addNoise(3750, 150), y: addNoise(1050, 150), type: 'gems', health: 150, resourceAmount: 8 },
+      { x: addNoise(4350, 150), y: addNoise(1150, 150), type: 'gems', health: 150, resourceAmount: 8 },
+      { x: addNoise(4950, 150), y: addNoise(950, 150), type: 'gems', health: 150, resourceAmount: 8 },
+      { x: addNoise(5550, 150), y: addNoise(1050, 150), type: 'gems', health: 150, resourceAmount: 10 },
+      { x: addNoise(6050, 100), y: addNoise(650, 150), type: 'gems', health: 180, resourceAmount: 12 },
+      { x: addNoise(6050, 100), y: addNoise(1250, 150), type: 'gems', health: 180, resourceAmount: 12 },
+      { x: addNoise(6050, 100), y: addNoise(1850, 150), type: 'gems', health: 180, resourceAmount: 12 },
     ];
 
     depositData.forEach((data, index) => {
-      const textureName = `${data.type}_deposit_placeholder`;
+      // Map old resource types to new visual sprites
+      // scrap → sheep (meat source), polymer → tree (wood source), gems → goldmine (gold source)
+      let textureName: string;
+      let depositScale = 0.5;
+
+      switch (data.type) {
+        case 'scrap':
+          textureName = this.textures.exists('deposit_sheep') ? 'deposit_sheep' : 'scrap_deposit_placeholder';
+          depositScale = 0.6;
+          break;
+        case 'polymer':
+          // Use tree sprites for wood sources
+          textureName = this.textures.exists('decor_tree1') ? 'decor_tree1' : 'polymer_deposit_placeholder';
+          depositScale = 0.4;
+          break;
+        case 'gems':
+          textureName = this.textures.exists('deposit_goldmine') ? 'deposit_goldmine' : 'gems_deposit_placeholder';
+          depositScale = 0.4;
+          break;
+        default:
+          textureName = `${data.type}_deposit_placeholder`;
+      }
+
       const deposit = this.physics.add.sprite(data.x, data.y, textureName);
+      deposit.setScale(depositScale);
 
       deposit.setData('type', 'deposit');
       deposit.setData('id', `deposit_${index}`);
@@ -403,6 +1212,29 @@ export class MainScene extends Phaser.Scene {
       body.setImmovable(true);
       body.moves = false;
 
+      // Special handling for sheep: smaller collider + idle animation
+      if (data.type === 'scrap' && textureName === 'deposit_sheep') {
+        // Sheep is small inside 128x128 frame - set smaller body
+        body.setSize(40, 30);
+        body.setOffset(44, 70);
+        // Play idle animation
+        if (this.anims.exists('sheep_idle_anim')) {
+          deposit.play('sheep_idle_anim');
+        }
+      }
+
+      // Special handling for gold mine: smaller collider at base
+      if (data.type === 'gems' && textureName === 'deposit_goldmine') {
+        // Gold mine has large top but smaller base - collider at bottom
+        const texture = this.textures.get('deposit_goldmine');
+        const frame = texture.get();
+        const scaledWidth = frame.width * depositScale;
+        const scaledHeight = frame.height * depositScale;
+        // Set body to bottom-center area (entrance)
+        body.setSize(scaledWidth * 0.4, scaledHeight * 0.3);
+        body.setOffset(frame.width * 0.3, frame.height * 0.65);
+      }
+
       this.resourceDeposits.add(deposit);
 
       // Create HP bar for deposit
@@ -410,8 +1242,15 @@ export class MainScene extends Phaser.Scene {
       this.createHpBar(depositId);
 
       // Add label above the deposit
+      // Map old names to new visual names
+      const labelMap: Record<string, string> = {
+        scrap: 'SHEEP',
+        polymer: 'TREE',
+        gems: 'GOLD MINE',
+      };
+      const labelText = labelMap[data.type] || data.type.toUpperCase();
       const labelColor = this.getResourceColor(data.type);
-      const label = this.add.text(data.x, data.y - 35, data.type.toUpperCase(), {
+      const label = this.add.text(data.x, data.y - 45, labelText, {
         fontFamily: 'Arial',
         fontSize: '9px',
         color: `#${labelColor.toString(16).padStart(6, '0')}`,
@@ -426,11 +1265,219 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
+  private createEnemyStructures(): void {
+    // Create watchtowers - map is 6400x2400, base at (800,800), zone split at 3200
+    const towerPositions: { x: number; y: number; type: TowerType }[] = [
+      // ZONE 1 - Starting area (basic towers) - near base perimeter
+      { x: 1400, y: 500, type: 'watchtower_basic' },
+      { x: 1400, y: 1100, type: 'watchtower_basic' },
+      { x: 500, y: 1600, type: 'watchtower_basic' },
+      { x: 1100, y: 1800, type: 'watchtower_basic' },
+      // ZONE 1 - Further out (advanced towers)
+      { x: 2000, y: 400, type: 'watchtower_advanced' },
+      { x: 2600, y: 800, type: 'watchtower_advanced' },
+      { x: 2000, y: 1600, type: 'watchtower_advanced' },
+      { x: 2600, y: 2000, type: 'watchtower_advanced' },
+
+      // ZONE 2 - Danger zone (advanced towers everywhere)
+      { x: 3400, y: 600, type: 'watchtower_advanced' },
+      { x: 4000, y: 400, type: 'watchtower_advanced' },
+      { x: 4600, y: 600, type: 'watchtower_advanced' },
+      { x: 5200, y: 400, type: 'watchtower_advanced' },
+      { x: 3400, y: 1400, type: 'watchtower_advanced' },
+      { x: 4000, y: 1200, type: 'watchtower_advanced' },
+      { x: 4600, y: 1400, type: 'watchtower_advanced' },
+      { x: 5200, y: 1200, type: 'watchtower_advanced' },
+      { x: 3800, y: 2000, type: 'watchtower_advanced' },
+      { x: 4400, y: 1800, type: 'watchtower_advanced' },
+      { x: 5000, y: 2000, type: 'watchtower_advanced' },
+      { x: 5600, y: 1800, type: 'watchtower_advanced' },
+    ];
+
+    towerPositions.forEach((pos) => {
+      this.createTower(pos.x, pos.y, pos.type);
+    });
+
+    // Create enemy houses - spawn enemies when attacked
+    const housePositions: { x: number; y: number; type: HouseType }[] = [
+      // ZONE 1 - Starting area (small/medium houses)
+      { x: 300, y: 300, type: 'house_small' },
+      { x: 1300, y: 300, type: 'house_small' },
+      { x: 300, y: 1400, type: 'house_small' },
+      { x: 1600, y: 700, type: 'house_small' },
+      { x: 2200, y: 500, type: 'house_medium' },
+      { x: 2200, y: 1300, type: 'house_medium' },
+      { x: 1600, y: 1900, type: 'house_medium' },
+      { x: 2800, y: 600, type: 'house_medium' },
+      { x: 2800, y: 1400, type: 'house_medium' },
+
+      // ZONE 2 - Danger zone (medium/large houses)
+      { x: 3500, y: 300, type: 'house_medium' },
+      { x: 4100, y: 500, type: 'house_medium' },
+      { x: 4700, y: 300, type: 'house_large' },
+      { x: 5300, y: 500, type: 'house_large' },
+      { x: 3500, y: 1100, type: 'house_medium' },
+      { x: 4100, y: 900, type: 'house_large' },
+      { x: 4700, y: 1100, type: 'house_large' },
+      { x: 5300, y: 900, type: 'house_large' },
+      { x: 3900, y: 1700, type: 'house_large' },
+      { x: 4500, y: 1500, type: 'house_large' },
+      { x: 5100, y: 1700, type: 'house_large' },
+      { x: 5700, y: 1500, type: 'house_large' },
+      // Far east - manor district
+      { x: 5900, y: 800, type: 'house_large' },
+      { x: 5900, y: 1400, type: 'house_large' },
+      { x: 5900, y: 2000, type: 'house_large' },
+    ];
+
+    housePositions.forEach((pos) => {
+      this.createHouse(pos.x, pos.y, pos.type);
+    });
+  }
+
+  private createTower(x: number, y: number, towerType: TowerType): Phaser.Physics.Arcade.Sprite {
+    const config = TOWER_CONFIGS[towerType];
+    const towerId = `tower_${this.towerIdCounter++}`;
+
+    // Create tower sprite using Tiny Swords building
+    const tower = this.physics.add.sprite(x, y, 'building_red_tower');
+    tower.setScale(0.5); // Scale down the tower sprite
+    tower.setDepth(4);
+    tower.setImmovable(true);
+
+    const body = tower.body as Phaser.Physics.Arcade.Body;
+    body.setImmovable(true);
+    body.moves = false;
+
+    // Set collider to bottom part of the tower (foundation)
+    const texture = this.textures.get('building_red_tower');
+    const frame = texture.get();
+    const scaledWidth = frame.width * 0.5;
+    const scaledHeight = frame.height * 0.5;
+    // Collider is 60% width, 25% height at the bottom
+    body.setSize(scaledWidth * 0.6, scaledHeight * 0.25);
+    body.setOffset(frame.width * 0.2, frame.height * 0.7);
+
+    // Set tower data
+    tower.setData('type', 'tower');
+    tower.setData('id', towerId);
+    tower.setData('towerType', towerType);
+    tower.setData('health', config.health);
+    tower.setData('maxHealth', config.health);
+    tower.setData('damage', config.damage);
+    tower.setData('attackSpeed', config.attackSpeed);
+    tower.setData('attackRange', config.attackRange);
+    tower.setData('expReward', config.expReward);
+    tower.setData('loot', config.loot);
+    tower.setData('state', 'active' as StructureState);
+    tower.setData('lastAttackTime', 0);
+
+    // Create HP bar
+    this.createHpBar(towerId);
+
+    // Add label
+    const label = this.add.text(x, y - 50, config.name, {
+      fontFamily: 'Arial',
+      fontSize: '10px',
+      color: '#ff6644',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    label.setOrigin(0.5);
+    label.setDepth(5);
+    this.depositLabels.set(towerId, label);
+
+    this.towers.add(tower);
+
+    // Spawn guards
+    for (let i = 0; i < config.guardCount; i++) {
+      const guardType = config.guardTypes[Phaser.Math.Between(0, config.guardTypes.length - 1)];
+      const angle = (i / config.guardCount) * Math.PI * 2;
+      const guardX = x + Math.cos(angle) * 50;
+      const guardY = y + Math.sin(angle) * 50;
+
+      const guardId = `enemy_${this.enemyIdCounter++}`;
+      const guard = this.spawnEnemy(guardX, guardY, guardId, guardType);
+      guard.setData('towerId', towerId); // Link guard to tower
+    }
+
+    return tower;
+  }
+
+  private createHouse(x: number, y: number, houseType: HouseType): Phaser.Physics.Arcade.Sprite {
+    const config = HOUSE_CONFIGS[houseType];
+    const houseId = `house_${this.houseIdCounter++}`;
+
+    // Select house sprite based on type
+    const houseSpriteMap: Record<string, string> = {
+      'house_small': 'building_red_house1',
+      'house_medium': 'building_red_house2',
+      'house_large': 'building_red_house3',
+    };
+    const spriteKey = houseSpriteMap[houseType] || 'building_red_house1';
+
+    // Create house sprite using Tiny Swords building
+    const house = this.physics.add.sprite(x, y, spriteKey);
+    house.setScale(0.5); // Scale down the house sprite
+    house.setDepth(3);
+    house.setImmovable(true);
+
+    const body = house.body as Phaser.Physics.Arcade.Body;
+    body.setImmovable(true);
+    body.moves = false;
+
+    // Set collider to bottom part of the house (foundation)
+    const texture = this.textures.get(spriteKey);
+    const frame = texture.get();
+    const scaledWidth = frame.width * 0.5;
+    const scaledHeight = frame.height * 0.5;
+    // Collider is 70% width, 30% height at the bottom
+    body.setSize(scaledWidth * 0.7, scaledHeight * 0.3);
+    body.setOffset(frame.width * 0.15, frame.height * 0.65);
+
+    // Set house data
+    house.setData('type', 'house');
+    house.setData('id', houseId);
+    house.setData('houseType', houseType);
+    house.setData('health', config.health);
+    house.setData('maxHealth', config.health);
+    house.setData('expReward', config.expReward);
+    house.setData('loot', config.loot);
+    house.setData('spawnTypes', config.spawnTypes);
+    house.setData('maxSpawns', config.maxSpawns);
+    house.setData('spawnInterval', config.spawnInterval);
+    house.setData('spawnsRemaining', config.maxSpawns);
+    house.setData('lastSpawnTime', 0);
+    house.setData('state', 'active' as StructureState);
+
+    // Create HP bar
+    this.createHpBar(houseId);
+
+    // Add label
+    const label = this.add.text(x, y - 40, config.name, {
+      fontFamily: 'Arial',
+      fontSize: '10px',
+      color: '#ddaa66',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    label.setOrigin(0.5);
+    label.setDepth(5);
+    this.depositLabels.set(houseId, label);
+
+    this.houses.add(house);
+    return house;
+  }
+
   private createPlayer(): void {
+    // Spawn player at base center
+    const spawnX = this.baseCenter.x;
+    const spawnY = this.baseCenter.y + 30; // Slightly below center of base
+
     // Create shadow sprite first (renders below player)
     this.playerShadow = this.add.sprite(
-      this.mapWidth / 2,
-      this.mapHeight / 2,
+      spawnX,
+      spawnY,
       'spider_idle_shadow_down'
     );
     this.playerShadow.setScale(0.5);
@@ -440,8 +1487,8 @@ export class MainScene extends Phaser.Scene {
 
     // Create player with spider sprite
     this.player = this.physics.add.sprite(
-      this.mapWidth / 2,
-      this.mapHeight / 2,
+      spawnX,
+      spawnY,
       'spider_idle_down'
     );
 
@@ -460,6 +1507,7 @@ export class MainScene extends Phaser.Scene {
     const body = this.player.body as Phaser.Physics.Arcade.Body;
     body.setSize(140, 140); // Hitbox in original sprite coordinates
     body.setOffset(58, 58); // Center the hitbox
+    body.pushable = false; // Player cannot be pushed by enemies
 
     // Start idle animation
     this.player.play('spider_idle_down');
@@ -481,18 +1529,49 @@ export class MainScene extends Phaser.Scene {
   }
 
   private createTestEnemies(): void {
-    this.enemies = this.physics.add.group({
-      collideWorldBounds: true,
-    });
-
     // Create spawn points around the map (outside base radius)
+    // Map is 6400x2400, base at (800, 800), zone split at 3200
     this.spawnPoints = [
-      { x: 200, y: 200, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0 },
-      { x: 1000, y: 200, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0 },
-      { x: 200, y: 750, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0 },
-      { x: 1000, y: 750, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0 },
-      { x: 350, y: 150, maxEnemies: 1, currentEnemies: 0, respawnTimer: 0 },
-      { x: 900, y: 500, maxEnemies: 1, currentEnemies: 0, respawnTimer: 0 },
+      // ===== ZONE 1 (Starting Area - left half 0-3200) =====
+      // Easy areas near base - weak enemies (peasants)
+      { x: 400, y: 400, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['peasant_unarmed', 'peasant_club'] as EnemyType[] },
+      { x: 1200, y: 400, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['peasant_unarmed', 'peasant_club'] as EnemyType[] },
+      { x: 400, y: 1200, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['peasant_unarmed', 'peasant_club'] as EnemyType[] },
+      { x: 1200, y: 1200, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['peasant_unarmed', 'peasant_club'] as EnemyType[] },
+
+      // Medium areas - guards and rogues (further from base)
+      { x: 1800, y: 600, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['peasant_club', 'guard_spear'] as EnemyType[] },
+      { x: 2400, y: 800, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['peasant_club', 'guard_spear'] as EnemyType[] },
+      { x: 1800, y: 1400, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['guard_spear', 'rogue_crossbow'] as EnemyType[] },
+      { x: 2400, y: 1600, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['guard_spear', 'rogue_crossbow'] as EnemyType[] },
+
+      // Zone 1 hard area - near portal
+      { x: 2800, y: 1000, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['guard_spear', 'knight_hammer'] as EnemyType[] },
+      { x: 2800, y: 1800, maxEnemies: 2, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['rogue_crossbow', 'knight_hammer'] as EnemyType[] },
+
+      // ===== ZONE 2 (Danger Zone - right half 3200-6400) =====
+      // Dense spawn areas with harder enemies
+      { x: 3600, y: 400, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['guard_spear', 'rogue_crossbow'] as EnemyType[] },
+      { x: 4200, y: 400, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['guard_spear', 'knight_hammer'] as EnemyType[] },
+      { x: 4800, y: 400, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['knight_hammer', 'hunter_rifle'] as EnemyType[] },
+      { x: 5400, y: 400, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['knight_hammer', 'hunter_rifle'] as EnemyType[] },
+
+      // Middle row - dangerous
+      { x: 3600, y: 1000, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['rogue_crossbow', 'hunter_rifle'] as EnemyType[] },
+      { x: 4200, y: 1200, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['knight_hammer', 'knight_hammer'] as EnemyType[] },
+      { x: 4800, y: 1000, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['hunter_rifle', 'hunter_rifle'] as EnemyType[] },
+      { x: 5400, y: 1200, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['knight_hammer', 'hunter_rifle'] as EnemyType[] },
+
+      // Bottom row - very dangerous
+      { x: 3600, y: 1800, maxEnemies: 3, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['guard_spear', 'knight_hammer'] as EnemyType[] },
+      { x: 4200, y: 2000, maxEnemies: 4, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['rogue_crossbow', 'knight_hammer'] as EnemyType[] },
+      { x: 4800, y: 1800, maxEnemies: 4, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['knight_hammer', 'hunter_rifle'] as EnemyType[] },
+      { x: 5400, y: 2000, maxEnemies: 4, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['hunter_rifle', 'hunter_rifle'] as EnemyType[] },
+
+      // Far east - elite zone
+      { x: 6000, y: 600, maxEnemies: 4, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['knight_hammer', 'hunter_rifle'] as EnemyType[] },
+      { x: 6000, y: 1200, maxEnemies: 4, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['hunter_rifle', 'hunter_rifle'] as EnemyType[] },
+      { x: 6000, y: 1800, maxEnemies: 4, currentEnemies: 0, respawnTimer: 0, enemyTypes: ['knight_hammer', 'hunter_rifle'] as EnemyType[] },
     ];
 
     // Draw spawn point indicators (subtle)
@@ -511,18 +1590,23 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
-  private spawnEnemyAtPoint(spawnPoint: { x: number; y: number; maxEnemies: number; currentEnemies: number; respawnTimer: number }): void {
+  private spawnEnemyAtPoint(spawnPoint: { x: number; y: number; maxEnemies: number; currentEnemies: number; respawnTimer: number; enemyTypes?: EnemyType[] }): void {
     if (spawnPoint.currentEnemies >= spawnPoint.maxEnemies) return;
 
     // Random offset from spawn point
     const offsetX = Phaser.Math.Between(-30, 30);
     const offsetY = Phaser.Math.Between(-30, 30);
 
+    // Pick random enemy type from spawn point's available types
+    const availableTypes = spawnPoint.enemyTypes || ['peasant_unarmed'] as EnemyType[];
+    const enemyType = availableTypes[Phaser.Math.Between(0, availableTypes.length - 1)];
+
     const enemyId = `enemy_${this.enemyIdCounter++}`;
     const enemy = this.spawnEnemy(
       spawnPoint.x + offsetX,
       spawnPoint.y + offsetY,
-      enemyId
+      enemyId,
+      enemyType
     );
 
     // Store spawn point reference on enemy
@@ -530,33 +1614,115 @@ export class MainScene extends Phaser.Scene {
     spawnPoint.currentEnemies++;
   }
 
-  private spawnEnemy(x: number, y: number, id: string): Phaser.Physics.Arcade.Sprite {
-    const enemy = this.physics.add.sprite(x, y, 'enemy_placeholder');
+  private spawnEnemy(x: number, y: number, id: string, enemyType: EnemyType = 'peasant_unarmed'): Phaser.Physics.Arcade.Sprite {
+    const config = ENEMY_CONFIGS[enemyType];
+
+    // Use new Tiny Swords sprite if available, otherwise fallback to placeholder
+    const spriteKey = config.sprites?.idle || 'enemy_placeholder';
+    const enemy = this.physics.add.sprite(x, y, spriteKey);
+
+    // Create animations for this enemy type if they exist and haven't been created yet
+    if (config.sprites) {
+      this.createEnemyAnimations(enemyType, config);
+      // Play idle animation
+      const idleAnimKey = `${enemyType}_idle`;
+      if (this.anims.exists(idleAnimKey)) {
+        enemy.play(idleAnimKey);
+      }
+    }
+
+    // Set scale for Tiny Swords sprites (they are 192x192)
+    if (config.scale) {
+      enemy.setScale(config.scale);
+    }
+
     enemy.setData('type', 'enemy');
     enemy.setData('id', id);
-    enemy.setData('health', 30);
-    enemy.setData('maxHealth', 30);
-    enemy.setData('damage', 5);
-    enemy.setData('attackRange', 40);
-    enemy.setData('attackSpeed', 1.0); // attacks per second
+    enemy.setData('enemyType', enemyType);
+    enemy.setData('health', config.health);
+    enemy.setData('maxHealth', config.health);
+    enemy.setData('damage', config.damage);
+    enemy.setData('attackRange', config.attackRange);
+    enemy.setData('attackSpeed', config.attackSpeed);
     enemy.setData('lastAttackTime', 0);
-    enemy.setData('aggroRadius', 150);
-    enemy.setData('moveSpeed', 50);
+    enemy.setData('aggroRadius', config.aggroRadius);
+    enemy.setData('moveSpeed', config.moveSpeed);
+    enemy.setData('behavior', config.behavior);
     enemy.setData('state', 'idle' as EnemyState);
-    enemy.setData('expReward', 15);
+    enemy.setData('expReward', config.expReward);
+    enemy.setData('soulValue', config.soulValue);
+    enemy.setData('loot', config.loot);
+    enemy.setData('attackType', 'attackType' in config ? config.attackType : 'melee');
     enemy.setCollideWorldBounds(true);
     enemy.setDepth(5);
 
-    // Set hitbox
+    // Set hitbox - scale based on sprite scale
     const body = enemy.body as Phaser.Physics.Arcade.Body;
-    body.setSize(24, 24);
-    body.setOffset(4, 4);
+    const hitboxSize = config.scale ? Math.floor(48 * config.scale * 2) : 24;
+    body.setSize(hitboxSize, hitboxSize);
+    const offset = config.frameSize ? (config.frameSize - hitboxSize) / 2 : 4;
+    body.setOffset(offset, offset);
 
     // Create HP bar graphics for this enemy
     this.createHpBar(id);
 
     this.enemies.add(enemy);
     return enemy;
+  }
+
+  private createEnemyAnimations(enemyType: EnemyType, config: typeof ENEMY_CONFIGS[EnemyType]): void {
+    if (!config.sprites) return;
+
+    // Tiny Swords spritesheets have 6 frames in a row
+    // Use slower frameRate for better visual perception
+    const IDLE_FRAME_RATE = 4;
+    const RUN_FRAME_RATE = 5;
+    const ATTACK_FRAME_RATE = 6;
+
+    // Create idle animation
+    const idleAnimKey = `${enemyType}_idle`;
+    if (!this.anims.exists(idleAnimKey) && this.textures.exists(config.sprites.idle)) {
+      const texture = this.textures.get(config.sprites.idle);
+      const frameCount = texture.frameTotal - 1; // frameTotal includes __BASE, subtract 1
+      this.anims.create({
+        key: idleAnimKey,
+        frames: this.anims.generateFrameNumbers(config.sprites.idle, { start: 0, end: Math.max(0, frameCount - 1) }),
+        frameRate: IDLE_FRAME_RATE,
+        repeat: -1
+      });
+    }
+
+    // Create run animation
+    const runAnimKey = `${enemyType}_run`;
+    if (!this.anims.exists(runAnimKey) && this.textures.exists(config.sprites.run)) {
+      const texture = this.textures.get(config.sprites.run);
+      const frameCount = texture.frameTotal - 1;
+      this.anims.create({
+        key: runAnimKey,
+        frames: this.anims.generateFrameNumbers(config.sprites.run, { start: 0, end: Math.max(0, frameCount - 1) }),
+        frameRate: RUN_FRAME_RATE,
+        repeat: -1
+      });
+    }
+
+    // Create attack animation
+    const attackAnimKey = `${enemyType}_attack`;
+    if (!this.anims.exists(attackAnimKey) && this.textures.exists(config.sprites.attack)) {
+      const texture = this.textures.get(config.sprites.attack);
+      const frameCount = texture.frameTotal - 1;
+      this.anims.create({
+        key: attackAnimKey,
+        frames: this.anims.generateFrameNumbers(config.sprites.attack, { start: 0, end: Math.max(0, frameCount - 1) }),
+        frameRate: ATTACK_FRAME_RATE,
+        repeat: 0
+      });
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  private setEnemyTint(enemy: Phaser.Physics.Arcade.Sprite, _enemyType: EnemyType): void {
+    // Reset tint (now using real sprites, no tint needed for normal state)
+    enemy.clearTint();
   }
 
   private setupCamera(): void {
@@ -581,6 +1747,22 @@ export class MainScene extends Phaser.Scene {
       uKey.on('down', () => {
         this.spawnUnit('creepy_clown');
       });
+
+      // Portal teleportation: Press SPACE near portal
+      const spaceKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+      spaceKey.on('down', () => {
+        if (this.isNearPortal && this.nearPortalId > 0) {
+          this.teleportThroughPortal(this.nearPortalId);
+        }
+      });
+
+      // Open Art Gallery with G key
+      const gKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.G);
+      gKey.on('down', () => {
+        this.scene.pause('MainScene');
+        this.scene.pause('UIScene');
+        this.scene.launch('ArtGalleryScene');
+      });
     }
   }
 
@@ -596,6 +1778,19 @@ export class MainScene extends Phaser.Scene {
     this.physics.add.collider(this.player, this.resourceDeposits);
     this.physics.add.collider(this.enemies, this.resourceDeposits);
     this.physics.add.collider(this.units, this.resourceDeposits);
+
+    // Collisions with buildings (towers and houses)
+    this.physics.add.collider(this.player, this.towers);
+    this.physics.add.collider(this.player, this.houses);
+    this.physics.add.collider(this.enemies, this.towers);
+    this.physics.add.collider(this.enemies, this.houses);
+    this.physics.add.collider(this.units, this.towers);
+    this.physics.add.collider(this.units, this.houses);
+
+    // Collisions with decoration colliders (trees, large bushes)
+    this.physics.add.collider(this.player, this.decorColliders);
+    this.physics.add.collider(this.enemies, this.decorColliders);
+    this.physics.add.collider(this.units, this.decorColliders);
 
     // Resource pickup
     this.physics.add.overlap(
@@ -643,6 +1838,9 @@ export class MainScene extends Phaser.Scene {
 
   private onCargoDeposited(data: { scrap: number; polymer: number; gems: number; total: number }): void {
     if (data.total > 0) {
+      // Create visual resources flying from player to storage
+      this.createResourceTransferEffect(data);
+
       // Show floating text for deposit
       this.showFloatingText(
         this.storageBuilding.x,
@@ -651,11 +1849,78 @@ export class MainScene extends Phaser.Scene {
         0xdaa520
       );
 
-      // Flash storage building
-      this.storageBuilding.setTint(0xffd700);
-      this.time.delayedCall(200, () => {
-        this.storageBuilding.clearTint();
+      // Flash storage building after resources arrive
+      this.time.delayedCall(500, () => {
+        this.storageBuilding.setTint(0xffd700);
+        this.time.delayedCall(200, () => {
+          this.storageBuilding.clearTint();
+        });
       });
+    }
+  }
+
+  private createResourceTransferEffect(data: { scrap: number; polymer: number; gems: number }): void {
+    const resourceTypes: Array<{ type: string; amount: number; color: number; sprite: string }> = [
+      { type: 'scrap', amount: data.scrap, color: 0x708090, sprite: 'resource_scrap' },
+      { type: 'polymer', amount: data.polymer, color: 0x32cd32, sprite: 'resource_polymer' },
+      { type: 'gems', amount: data.gems, color: 0x00bfff, sprite: 'resource_gems' },
+    ];
+
+    let delay = 0;
+    for (const res of resourceTypes) {
+      if (res.amount <= 0) continue;
+
+      // Create 1-3 sprites per resource type (more for larger amounts)
+      const spriteCount = Math.min(3, Math.max(1, Math.ceil(res.amount / 5)));
+
+      for (let i = 0; i < spriteCount; i++) {
+        const spawnX = this.player.x + Phaser.Math.Between(-15, 15);
+        const spawnY = this.player.y + Phaser.Math.Between(-15, 15);
+
+        // Create resource sprite or circle fallback
+        const useSprite = this.textures.exists(res.sprite);
+        let resource: Phaser.GameObjects.Sprite | Phaser.GameObjects.Arc;
+
+        if (useSprite) {
+          resource = this.add.sprite(spawnX, spawnY, res.sprite);
+          (resource as Phaser.GameObjects.Sprite).setScale(0.5);
+        } else {
+          resource = this.add.circle(spawnX, spawnY, 5, res.color);
+        }
+        resource.setDepth(100);
+
+        // Calculate target and arc
+        const targetX = this.storageBuilding.x;
+        const targetY = this.storageBuilding.y;
+        const distance = Phaser.Math.Distance.Between(spawnX, spawnY, targetX, targetY);
+        const arcHeight = Math.min(60, distance * 0.25);
+
+        // Animate to storage with arc
+        this.tweens.add({
+          targets: resource,
+          x: targetX,
+          y: targetY,
+          duration: 400 + i * 50,
+          delay: delay + i * 80,
+          ease: 'Sine.easeIn',
+          onUpdate: (tween) => {
+            const progress = tween.progress;
+            const arcOffset = Math.sin(progress * Math.PI) * arcHeight;
+            resource.y = Phaser.Math.Linear(spawnY, targetY, progress) - arcOffset;
+          },
+          onComplete: () => {
+            // Small flash at destination
+            this.tweens.add({
+              targets: resource,
+              scale: 0.1,
+              alpha: 0,
+              duration: 100,
+              onComplete: () => resource.destroy(),
+            });
+          },
+        });
+      }
+      delay += 100; // Stagger different resource types
     }
   }
 
@@ -680,8 +1945,83 @@ export class MainScene extends Phaser.Scene {
     // Show floating text
     this.showFloatingText(sprite.x, sprite.y, `+${amount}`, this.getResourceColor(resourceType));
 
+    // Show soul collection effect for souls
+    if (resourceType === 'souls') {
+      this.showSoulCollectEffect(sprite.x, sprite.y);
+    }
+
     // Destroy resource
     sprite.destroy();
+  }
+
+  private showSoulCollectEffect(x: number, y: number): void {
+    // Purple fire effect for soul collection
+    const purpleColor = 0x9932cc;
+
+    // Use Fire animation with purple tint
+    if (this.anims.exists('fire_anim')) {
+      const fire = this.add.sprite(x, y, 'effect_fire1');
+      fire.setScale(0.6);
+      fire.setDepth(100);
+      fire.setTint(purpleColor);
+      fire.setAlpha(0.9);
+      fire.play('fire_anim');
+
+      // Fire rises and fades
+      this.tweens.add({
+        targets: fire,
+        y: y - 40,
+        alpha: 0,
+        scaleX: 0.3,
+        scaleY: 0.8,
+        duration: 600,
+        ease: 'Power2',
+        onComplete: () => fire.destroy(),
+      });
+    }
+
+    // Create expanding ring
+    const ring = this.add.circle(x, y, 5, purpleColor, 0.8);
+    ring.setStrokeStyle(2, purpleColor);
+    ring.setDepth(99);
+
+    this.tweens.add({
+      targets: ring,
+      scaleX: 3,
+      scaleY: 3,
+      alpha: 0,
+      duration: 400,
+      ease: 'Quad.easeOut',
+      onComplete: () => ring.destroy()
+    });
+
+    // Create rising particles that fly to player
+    for (let i = 0; i < 6; i++) {
+      const angle = (i / 6) * Math.PI * 2;
+      const particle = this.add.circle(
+        x + Math.cos(angle) * 15,
+        y + Math.sin(angle) * 15,
+        4,
+        purpleColor,
+        0.9
+      );
+      particle.setDepth(101);
+
+      this.tweens.add({
+        targets: particle,
+        x: this.player.x,
+        y: this.player.y,
+        alpha: 0,
+        scale: 0.1,
+        duration: 350 + i * 50,
+        ease: 'Quad.easeIn',
+        onComplete: () => particle.destroy()
+      });
+    }
+
+    // Flash player purple briefly
+    this.player.setTint(purpleColor);
+    this.time.delayedCall(200, () => this.player.clearTint());
   }
 
   private getResourceColor(type: string): number {
@@ -770,29 +2110,52 @@ export class MainScene extends Phaser.Scene {
   }
 
   private showLevelUpEffect(newLevel: number): void {
-    // Flash effect on player
-    this.player.setTint(0x44aaff);
+    // Flash effect on player - golden color
+    this.player.setTint(0xffd700);
     this.time.delayedCall(100, () => this.player.setTint(0xffffff));
-    this.time.delayedCall(200, () => this.player.setTint(0x44aaff));
+    this.time.delayedCall(200, () => this.player.setTint(0xffd700));
     this.time.delayedCall(300, () => this.player.setTint(0xffffff));
+    this.time.delayedCall(400, () => this.player.setTint(0xffd700));
+    this.time.delayedCall(500, () => this.player.setTint(0xffffff));
 
-    // Floating text
-    this.showFloatingText(this.player.x, this.player.y - 50, `LEVEL UP! Lv.${newLevel}`, 0x44aaff);
+    // Floating text - golden
+    this.showFloatingText(this.player.x, this.player.y - 50, `LEVEL UP! Lv.${newLevel}`, 0xffd700);
 
-    // Particle burst effect
+    // Golden explosion effect
+    if (this.anims.exists('explosion_anim')) {
+      const explosion = this.add.sprite(this.player.x, this.player.y, 'effect_explosion1');
+      explosion.setScale(1.2);
+      explosion.setDepth(100);
+      explosion.setTint(0xffd700); // Golden tint
+      explosion.play('explosion_anim');
+      explosion.once('animationcomplete', () => explosion.destroy());
+    }
+
+    // Secondary ring effect
+    const ring = this.add.circle(this.player.x, this.player.y, 20, 0xffd700, 0);
+    ring.setStrokeStyle(4, 0xffd700, 1);
+    ring.setDepth(99);
+    this.tweens.add({
+      targets: ring,
+      scaleX: 4,
+      scaleY: 4,
+      alpha: 0,
+      duration: 600,
+      ease: 'Power2',
+      onComplete: () => ring.destroy(),
+    });
+
+    // Particle burst effect - golden particles
     const particles = this.add.particles(this.player.x, this.player.y, 'particle_placeholder', {
-      speed: { min: 50, max: 150 },
-      scale: { start: 0.5, end: 0 },
-      lifespan: 800,
-      quantity: 20,
-      tint: 0x44aaff,
+      speed: { min: 80, max: 200 },
+      scale: { start: 0.6, end: 0 },
+      lifespan: 1000,
+      quantity: 30,
+      tint: 0xffd700,
       emitting: false,
     });
-    particles.explode(20);
-    this.time.delayedCall(1000, () => particles.destroy());
-
-    // Play level up sound (if we had audio)
-    // this.sound.play('level_up');
+    particles.explode(30);
+    this.time.delayedCall(1200, () => particles.destroy());
   }
 
   update(time: number, delta: number): void {
@@ -800,12 +2163,22 @@ export class MainScene extends Phaser.Scene {
     this.handlePlayerAutoAttack(time);
     this.updateEnemies(time);
     this.updateUnits(time);
+    this.updateTowers(time);
+    this.updateHouses(time);
+    this.updateFarms(time);
     this.updateHpBars();
     this.checkStorageRange();
     this.checkWorkbenchRange();
+    this.checkPortalRange();
+    this.checkFarmRange();
     this.updateSoulDraining(delta);
     this.checkForCorpseInteraction();
     this.checkEnemyRespawn(time, delta);
+
+    // Update quest move objectives
+    if (this.player && this.player.active) {
+      questManager.updateMoveObjective(this.player.x, this.player.y);
+    }
   }
 
   private checkEnemyRespawn(time: number, _delta: number): void {
@@ -873,14 +2246,342 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  private handlePlayerMovement(): void {
-    // Don't allow movement during attack animation
-    if (this.isPlayerAttacking) {
-      this.player.setVelocity(0, 0);
-      this.updateShadowPosition();
-      return;
+  private checkPortalRange(): void {
+    const PORTAL_INTERACT_RADIUS = 60;
+
+    // Check Portal 1
+    if (this.portal1) {
+      const distance1 = Phaser.Math.Distance.Between(
+        this.player.x,
+        this.player.y,
+        this.portal1.x,
+        this.portal1.y
+      );
+
+      if (distance1 <= PORTAL_INTERACT_RADIUS) {
+        this.isNearPortal = true;
+        this.nearPortalId = 1;
+        this.portal1UseText.setVisible(true);
+        if (this.portal2UseText) this.portal2UseText.setVisible(false);
+        return;
+      }
     }
 
+    // Check Portal 2
+    if (this.portal2) {
+      const distance2 = Phaser.Math.Distance.Between(
+        this.player.x,
+        this.player.y,
+        this.portal2.x,
+        this.portal2.y
+      );
+
+      if (distance2 <= PORTAL_INTERACT_RADIUS) {
+        this.isNearPortal = true;
+        this.nearPortalId = 2;
+        this.portal2UseText.setVisible(true);
+        if (this.portal1UseText) this.portal1UseText.setVisible(false);
+        return;
+      }
+    }
+
+    // Not near any portal
+    if (this.isNearPortal) {
+      this.isNearPortal = false;
+      this.nearPortalId = 0;
+      if (this.portal1UseText) this.portal1UseText.setVisible(false);
+      if (this.portal2UseText) this.portal2UseText.setVisible(false);
+    }
+  }
+
+  private teleportThroughPortal(fromPortalId: number): void {
+    // Determine destination based on which portal we're using
+    let destX: number;
+    let destY: number;
+    let newZone: number;
+
+    if (fromPortalId === 1) {
+      // Teleport to Zone 2 (slightly past portal 2)
+      destX = this.portal2.x + 80;
+      destY = this.portal2.y;
+      newZone = 2;
+    } else {
+      // Teleport back to Zone 1 (slightly past portal 1 towards base)
+      destX = this.portal1.x - 80;
+      destY = this.portal1.y;
+      newZone = 1;
+    }
+
+    // Visual teleport effect on player
+    this.createTeleportEffect(this.player.x, this.player.y);
+
+    // Teleport player
+    this.player.setPosition(destX, destY);
+    this.updateShadowPosition();
+
+    // Teleport units too
+    this.units.getChildren().forEach((unit) => {
+      const sprite = unit as Phaser.Physics.Arcade.Sprite;
+      if (sprite.getData('state') !== 'dead') {
+        // Spread units around destination
+        const offsetX = Phaser.Math.Between(-60, 60);
+        const offsetY = Phaser.Math.Between(-60, 60);
+        sprite.setPosition(destX + offsetX, destY + offsetY);
+      }
+    });
+
+    // Visual teleport effect at destination
+    this.createTeleportEffect(destX, destY);
+
+    // Emit zone change event
+    gameEvents.emit('zone:changed', { zone: newZone });
+  }
+
+  private createTeleportEffect(x: number, y: number): void {
+    const particles: Phaser.GameObjects.Arc[] = [];
+    const particleCount = 20;
+
+    for (let i = 0; i < particleCount; i++) {
+      const angle = (i / particleCount) * Math.PI * 2;
+      const particle = this.add.circle(x, y, 4, 0xcc66ff);
+      particle.setDepth(10);
+      particles.push(particle);
+
+      // Animate particles outward
+      this.tweens.add({
+        targets: particle,
+        x: x + Math.cos(angle) * 80,
+        y: y + Math.sin(angle) * 80,
+        alpha: 0,
+        scale: 0.1,
+        duration: 500,
+        ease: 'Power2',
+        onComplete: () => {
+          particle.destroy();
+        },
+      });
+    }
+
+    // Flash effect
+    const flash = this.add.circle(x, y, 50, 0xffffff, 0.8);
+    flash.setDepth(9);
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      scale: 2,
+      duration: 300,
+      onComplete: () => {
+        flash.destroy();
+      },
+    });
+  }
+
+  private updateFarms(time: number): void {
+    // Update farms every second for performance
+    if (time - this.lastFarmUpdate < 1000) return;
+    this.lastFarmUpdate = time;
+
+    this.farms.forEach((farm) => {
+      const storedResources = farm.getData('storedResources') as number;
+      const capacity = farm.getData('capacity') as number;
+      const productionRate = farm.getData('productionRate') as number; // per minute
+      const lastProductionTime = farm.getData('lastProductionTime') as number;
+
+      // Calculate time elapsed since last update (in minutes)
+      const elapsedMinutes = (time - lastProductionTime) / 60000;
+
+      // Calculate resources produced
+      const produced = elapsedMinutes * productionRate;
+
+      // Add to storage (capped at capacity)
+      const newStored = Math.min(storedResources + produced, capacity);
+      farm.setData('storedResources', newStored);
+      farm.setData('lastProductionTime', time);
+
+      // Update display text
+      const resourceText = farm.getData('resourceText') as Phaser.GameObjects.Text;
+      if (resourceText) {
+        resourceText.setText(`${Math.floor(newStored)} / ${Math.floor(capacity)}`);
+
+        // Change color based on fill level
+        if (newStored >= capacity * 0.9) {
+          resourceText.setColor('#ff6666'); // Red when almost full
+        } else if (newStored >= capacity * 0.5) {
+          resourceText.setColor('#ffff66'); // Yellow when half full
+        } else {
+          resourceText.setColor('#aaffaa'); // Green when low
+        }
+      }
+    });
+  }
+
+  private checkFarmRange(): void {
+    let foundFarm = false;
+
+    this.farms.forEach((farm, farmId) => {
+      const distance = Phaser.Math.Distance.Between(
+        this.player.x,
+        this.player.y,
+        farm.x,
+        farm.y
+      );
+
+      if (distance <= GAME_CONFIG.FARM_INTERACT_RADIUS && !foundFarm) {
+        foundFarm = true;
+        this.isNearFarm = true;
+
+        // Check if there are resources to collect
+        const storedResources = farm.getData('storedResources') as number;
+        if (storedResources >= 1) {
+          // Auto-collect resources when in range
+          this.collectFarmResources(farmId);
+        }
+      }
+    });
+
+    if (!foundFarm && this.isNearFarm) {
+      this.isNearFarm = false;
+    }
+  }
+
+  private collectFarmResources(farmId: string): void {
+    const farm = this.farms.get(farmId);
+    if (!farm) return;
+
+    const storedResources = farm.getData('storedResources') as number;
+    if (storedResources < 1) return;
+
+    const farmType = farm.getData('farmType') as FarmType;
+    const config = FARM_CONFIGS[farmType];
+    const resourceType = config.resourceType;
+
+    // Collect integer amount
+    const toCollect = Math.floor(storedResources);
+
+    // Add to player's stored resources
+    gameEvents.emit('resources:collected', {
+      type: resourceType,
+      amount: toCollect,
+      fromFarm: true,
+    });
+
+    // Update farm storage
+    farm.setData('storedResources', storedResources - toCollect);
+
+    // Visual effect
+    this.createFarmCollectEffect(farm.x, farm.y, resourceType);
+
+    // Update display
+    const capacity = farm.getData('capacity') as number;
+    const newStored = storedResources - toCollect;
+    const resourceText = farm.getData('resourceText') as Phaser.GameObjects.Text;
+    if (resourceText) {
+      resourceText.setText(`${Math.floor(newStored)} / ${Math.floor(capacity)}`);
+      resourceText.setColor('#aaffaa');
+    }
+  }
+
+  private createFarmCollectEffect(x: number, y: number, resourceType: string): void {
+    const colors: Record<string, number> = {
+      scrap: 0x708090,
+      polymer: 0x32cd32,
+      gems: 0x00bfff,
+    };
+    const color = colors[resourceType] || 0xffffff;
+
+    // Get resource sprite key based on type
+    const resourceSprites: Record<string, string> = {
+      scrap: 'resource_scrap',
+      polymer: 'resource_polymer',
+      gems: 'resource_gems',
+    };
+    const spriteKey = resourceSprites[resourceType] || 'resource_scrap';
+
+    // Create 3-5 resource sprites that fly to storage
+    const resourceCount = Phaser.Math.Between(3, 5);
+    for (let i = 0; i < resourceCount; i++) {
+      // Spawn resource at farm with slight scatter
+      const spawnX = x + Phaser.Math.Between(-20, 20);
+      const spawnY = y + Phaser.Math.Between(-20, 20);
+
+      // Check if texture exists, otherwise use circle
+      const useSprite = this.textures.exists(spriteKey);
+      let resource: Phaser.GameObjects.Sprite | Phaser.GameObjects.Arc;
+
+      if (useSprite) {
+        resource = this.add.sprite(spawnX, spawnY, spriteKey);
+        (resource as Phaser.GameObjects.Sprite).setScale(0.6);
+      } else {
+        resource = this.add.circle(spawnX, spawnY, 6, color);
+      }
+      resource.setDepth(100);
+
+      // Calculate target position (storage building)
+      const targetX = this.storageBuilding.x;
+      const targetY = this.storageBuilding.y;
+
+      // Calculate arc height based on distance
+      const distance = Phaser.Math.Distance.Between(spawnX, spawnY, targetX, targetY);
+      const arcHeight = Math.min(80, distance * 0.3);
+
+      // Stagger the animations
+      const delay = i * 100;
+
+      // First tween: arc up and towards storage
+      this.tweens.add({
+        targets: resource,
+        x: targetX,
+        y: targetY,
+        duration: 600 + i * 50,
+        delay: delay,
+        ease: 'Sine.easeInOut',
+        onUpdate: (tween) => {
+          // Add arc by modifying Y based on progress
+          const progress = tween.progress;
+          const arcOffset = Math.sin(progress * Math.PI) * arcHeight;
+          resource.y = Phaser.Math.Linear(spawnY, targetY, progress) - arcOffset;
+        },
+        onComplete: () => {
+          // Flash effect at storage
+          this.tweens.add({
+            targets: resource,
+            scale: 0.2,
+            alpha: 0,
+            duration: 150,
+            onComplete: () => {
+              resource.destroy();
+            },
+          });
+        },
+      });
+    }
+
+    // Create floating +N text
+    const floatingText = this.add.text(x, y - 20, '+', {
+      fontFamily: 'Arial',
+      fontSize: '14px',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    floatingText.setOrigin(0.5);
+    floatingText.setDepth(10);
+
+    // Animate upward and fade
+    this.tweens.add({
+      targets: floatingText,
+      y: y - 50,
+      alpha: 0,
+      duration: 800,
+      ease: 'Power2',
+      onComplete: () => {
+        floatingText.destroy();
+      },
+    });
+  }
+
+  private handlePlayerMovement(): void {
+    // Allow movement even during attack (player can move + attack simultaneously)
     let velocityX = 0;
     let velocityY = 0;
 
@@ -926,13 +2627,14 @@ export class MainScene extends Phaser.Scene {
         this.playerShadow.play(`spider_walk_shadow_${this.playerDirection}`, true);
       }
     } else {
-      // Standing still - play idle or nervous animation
+      // Standing still - play idle or nervous animation (but not during attack)
       if (this.isPlayerDraining) {
         if (!this.player.anims.currentAnim?.key.includes('nervous')) {
           this.player.play(`spider_nervous_${this.playerDirection}`, true);
           this.playerShadow.play(`spider_nervous_shadow_${this.playerDirection}`, true);
         }
-      } else {
+      } else if (!this.isPlayerAttacking) {
+        // Only switch to idle if not currently attacking
         if (!this.player.anims.currentAnim?.key.includes('idle')) {
           this.player.play(`spider_idle_${this.playerDirection}`, true);
           this.playerShadow.play(`spider_idle_shadow_${this.playerDirection}`, true);
@@ -1014,7 +2716,61 @@ export class MainScene extends Phaser.Scene {
       return;
     }
 
-    // If no enemies, check for resource deposits in range
+    // Check for towers in range (second priority after enemies)
+    let nearestTower: Phaser.Physics.Arcade.Sprite | null = null;
+    let nearestTowerDistance = this.playerAttackRange;
+
+    this.towers.getChildren().forEach((towerObj) => {
+      const tower = towerObj as Phaser.Physics.Arcade.Sprite;
+      if (tower.getData('state') === 'destroyed') return;
+
+      const distance = Phaser.Math.Distance.Between(
+        this.player.x,
+        this.player.y,
+        tower.x,
+        tower.y
+      );
+
+      if (distance < nearestTowerDistance) {
+        nearestTowerDistance = distance;
+        nearestTower = tower;
+      }
+    });
+
+    if (nearestTower) {
+      this.playerAttackStructure(nearestTower);
+      this.lastPlayerAttackTime = time;
+      return;
+    }
+
+    // Check for houses in range (third priority)
+    let nearestHouse: Phaser.Physics.Arcade.Sprite | null = null;
+    let nearestHouseDistance = this.playerAttackRange;
+
+    this.houses.getChildren().forEach((houseObj) => {
+      const house = houseObj as Phaser.Physics.Arcade.Sprite;
+      if (house.getData('state') === 'destroyed') return;
+
+      const distance = Phaser.Math.Distance.Between(
+        this.player.x,
+        this.player.y,
+        house.x,
+        house.y
+      );
+
+      if (distance < nearestHouseDistance) {
+        nearestHouseDistance = distance;
+        nearestHouse = house;
+      }
+    });
+
+    if (nearestHouse) {
+      this.playerAttackStructure(nearestHouse);
+      this.lastPlayerAttackTime = time;
+      return;
+    }
+
+    // If no enemies or structures, check for resource deposits in range
     let nearestDeposit: Phaser.Physics.Arcade.Sprite | null = null;
     let nearestDepositDistance = this.playerAttackRange;
 
@@ -1058,7 +2814,273 @@ export class MainScene extends Phaser.Scene {
     this.dealDamageToEnemy(enemy, damage);
 
     // Attack line effect
-    this.showAttackLine(this.player.x, this.player.y, enemy.x, enemy.y, 0x8b0000);
+    this.showDustEffect(enemy.x, enemy.y);
+  }
+
+  private playerAttackStructure(structure: Phaser.Physics.Arcade.Sprite): void {
+    const damage = this.playerDamage;
+    const currentHealth = structure.getData('health') as number;
+    const newHealth = Math.max(0, currentHealth - damage);
+    structure.setData('health', newHealth);
+
+    const maxHealth = structure.getData('maxHealth') as number;
+    const structureId = structure.getData('id') as string;
+    const structureType = structure.getData('type') as string;
+
+    // Determine direction to structure
+    const dx = structure.x - this.player.x;
+    const dy = structure.y - this.player.y;
+    this.playerDirection = this.getDirectionFromVelocity(dx, dy);
+
+    // Play attack animation
+    this.isPlayerAttacking = true;
+    this.player.play(`spider_attack_${this.playerDirection}`, true);
+    this.playerShadow.play(`spider_attack_shadow_${this.playerDirection}`, true);
+
+    // Emit health changed event for HP bar
+    gameEvents.emit('entity:health-changed', {
+      entityId: structureId,
+      x: structure.x,
+      y: structure.y - 40,
+      current: newHealth,
+      max: maxHealth,
+    });
+
+    // Show damage number
+    gameEvents.emit('combat:damage', {
+      x: structure.x,
+      y: structure.y,
+      damage: damage,
+      isCritical: false,
+    });
+
+    // Visual feedback - flash
+    structure.setTint(0xffffff);
+    this.time.delayedCall(100, () => {
+      if (structure.active && structure.getData('state') === 'active') {
+        // Restore original tint
+        if (structureType === 'tower') {
+          structure.setTint(0x8b4513);
+        } else {
+          structure.setTint(0x885533);
+        }
+      }
+    });
+
+    // Dust effect on hit
+    this.showDustEffect(structure.x, structure.y);
+
+    // Check if structure is destroyed
+    if (newHealth <= 0) {
+      this.destroyStructure(structure);
+    }
+  }
+
+  private destroyStructure(structure: Phaser.Physics.Arcade.Sprite): void {
+    const structureId = structure.getData('id') as string;
+    const structureType = structure.getData('type') as string;
+    const expReward = structure.getData('expReward') as number;
+    const loot = structure.getData('loot') as { scrap: { min: number; max: number; chance: number }; polymer: { min: number; max: number; chance: number }; gems: { min: number; max: number; chance: number } };
+
+    // Mark as destroyed
+    structure.setData('state', 'destroyed' as StructureState);
+
+    // Award XP
+    gameEvents.emit('player:exp-gained', { amount: expReward });
+
+    // Show XP text
+    this.showFloatingText(structure.x, structure.y - 30, `+${expReward} XP`, 0x00ffff);
+
+    // Emit structure destroyed event for quest system
+    gameEvents.emit('structure:destroyed', {
+      structureType: structureType,
+      structureId: structureId,
+      position: { x: structure.x, y: structure.y }
+    });
+
+    // Drop loot
+    this.dropLootFromTable(structure.x, structure.y, loot);
+
+    // Destroy HP bar
+    const hpBar = this.hpBarsGraphics.get(structureId);
+    if (hpBar) {
+      hpBar.destroy();
+      this.hpBarsGraphics.delete(structureId);
+    }
+
+    // Remove label
+    const label = this.depositLabels.get(structureId);
+    if (label) {
+      label.destroy();
+      this.depositLabels.delete(structureId);
+    }
+
+    // Create destruction dust effects covering the building
+    this.createBuildingDestructionEffect(structure.x, structure.y, structureType);
+
+    // Switch to destroyed sprite if available, otherwise fade out
+    const destroyedTextureKey = this.getDestroyedTextureKey(structureType);
+    if (destroyedTextureKey && this.textures.exists(destroyedTextureKey)) {
+      // Delay the texture switch to sync with dust effect
+      this.time.delayedCall(300, () => {
+        structure.setTexture(destroyedTextureKey);
+        structure.setTint(0xffffff); // Clear any tint
+        structure.setAlpha(0.9);
+      });
+    } else {
+      // Fallback: tint and fade out
+      structure.setTint(0x333333);
+      this.tweens.add({
+        targets: structure,
+        alpha: 0.3,
+        duration: 1000,
+      });
+    }
+  }
+
+  private getDestroyedTextureKey(structureType: string): string | null {
+    // Map structure types to their destroyed sprite keys
+    switch (structureType) {
+      case 'tower':
+        return 'building_red_tower_destroyed';
+      case 'house':
+        return 'building_red_house_destroyed';
+      // Castle would use 'building_red_castle_destroyed' if we add castles
+      default:
+        return null;
+    }
+  }
+
+  private createBuildingDestructionEffect(x: number, y: number, structureType: string): void {
+    // Create multiple dust effects to cover the building during collapse
+    const dustCount = structureType === 'tower' ? 6 : 4;
+    const spreadX = structureType === 'tower' ? 30 : 40;
+    const spreadY = structureType === 'tower' ? 50 : 30;
+
+    // Spawn dust clouds with slight delays for staggered effect
+    for (let i = 0; i < dustCount; i++) {
+      this.time.delayedCall(i * 80, () => {
+        const offsetX = (Math.random() - 0.5) * spreadX * 2;
+        const offsetY = (Math.random() - 0.5) * spreadY * 2;
+
+        if (this.anims.exists('dust_anim')) {
+          const dust = this.add.sprite(x + offsetX, y + offsetY, 'effect_dust1');
+          dust.setScale(1.2 + Math.random() * 0.5);
+          dust.setDepth(100);
+          dust.setAlpha(0.9);
+          dust.play('dust_anim');
+          dust.once('animationcomplete', () => dust.destroy());
+        } else {
+          // Fallback dust particles
+          const dustCloud = this.add.circle(x + offsetX, y + offsetY, 15, 0x8b7355, 0.7);
+          dustCloud.setDepth(100);
+          this.tweens.add({
+            targets: dustCloud,
+            scaleX: 2.5,
+            scaleY: 2.5,
+            alpha: 0,
+            duration: 400,
+            onComplete: () => dustCloud.destroy(),
+          });
+        }
+      });
+    }
+
+    // Also play a small explosion in the center
+    if (this.anims.exists('explosion_anim')) {
+      this.time.delayedCall(200, () => {
+        const explosion = this.add.sprite(x, y, 'effect_explosion1');
+        explosion.setScale(0.6);
+        explosion.setDepth(101);
+        explosion.play('explosion_anim');
+        explosion.once('animationcomplete', () => explosion.destroy());
+      });
+    }
+  }
+
+  private createDestructionEffect(x: number, y: number, color: number): void {
+    // Play explosion animation if available
+    if (this.anims.exists('explosion_anim')) {
+      const explosion = this.add.sprite(x, y, 'effect_explosion1');
+      explosion.setScale(0.8);
+      explosion.setDepth(100);
+      explosion.play('explosion_anim');
+      explosion.once('animationcomplete', () => explosion.destroy());
+    }
+
+    // Create particles flying out
+    for (let i = 0; i < 8; i++) {
+      const angle = (i / 8) * Math.PI * 2;
+      const particle = this.add.circle(x, y, 5, color);
+      particle.setDepth(100);
+
+      this.tweens.add({
+        targets: particle,
+        x: x + Math.cos(angle) * 50,
+        y: y + Math.sin(angle) * 50,
+        alpha: 0,
+        scale: 0,
+        duration: 500,
+        ease: 'Power2',
+        onComplete: () => particle.destroy(),
+      });
+    }
+
+    // Add dust clouds around destruction
+    for (let i = 0; i < 3; i++) {
+      this.time.delayedCall(i * 100, () => {
+        const offsetX = Phaser.Math.Between(-30, 30);
+        const offsetY = Phaser.Math.Between(-30, 30);
+        this.showDustEffect(x + offsetX, y + offsetY);
+      });
+    }
+  }
+
+  private dropLootFromTable(x: number, y: number, lootTable: { scrap: { min: number; max: number; chance: number }; polymer: { min: number; max: number; chance: number }; gems: { min: number; max: number; chance: number } }): void {
+    // Drop scrap
+    if (Math.random() < lootTable.scrap.chance) {
+      const amount = Phaser.Math.Between(lootTable.scrap.min, lootTable.scrap.max);
+      for (let i = 0; i < amount; i++) {
+        this.time.delayedCall(i * 30, () => {
+          this.spawnResource(
+            x + Phaser.Math.Between(-30, 30),
+            y + Phaser.Math.Between(-30, 30),
+            'scrap',
+            1
+          );
+        });
+      }
+    }
+
+    // Drop polymer
+    if (Math.random() < lootTable.polymer.chance) {
+      const amount = Phaser.Math.Between(lootTable.polymer.min, lootTable.polymer.max);
+      for (let i = 0; i < amount; i++) {
+        this.time.delayedCall(i * 30, () => {
+          this.spawnResource(
+            x + Phaser.Math.Between(-30, 30),
+            y + Phaser.Math.Between(-30, 30),
+            'polymer',
+            1
+          );
+        });
+      }
+    }
+
+    // Drop gems
+    if (Math.random() < lootTable.gems.chance) {
+      const amount = Phaser.Math.Between(lootTable.gems.min, lootTable.gems.max);
+      for (let i = 0; i < amount; i++) {
+        this.time.delayedCall(i * 30, () => {
+          this.spawnResource(
+            x + Phaser.Math.Between(-30, 30),
+            y + Phaser.Math.Between(-30, 30),
+            'gems',
+            1
+          );
+        });
+      }
+    }
   }
 
   private playerAttackDeposit(deposit: Phaser.Physics.Arcade.Sprite): void {
@@ -1106,9 +3128,8 @@ export class MainScene extends Phaser.Scene {
       }
     });
 
-    // Attack line effect (color based on resource type)
-    const lineColor = this.getResourceColor(resourceType);
-    this.showAttackLine(this.player.x, this.player.y, deposit.x, deposit.y, lineColor);
+    // Dust effect on hit
+    this.showDustEffect(deposit.x, deposit.y);
 
     // Drop small amount of resources on each hit
     if (Math.random() < 0.3) {
@@ -1210,6 +3231,9 @@ export class MainScene extends Phaser.Scene {
       }
     });
 
+    // Dust effect on damage
+    this.showDustEffect(enemy.x, enemy.y);
+
     // Check death
     if (newHealth <= 0) {
       this.killEnemy(enemy);
@@ -1222,6 +3246,9 @@ export class MainScene extends Phaser.Scene {
 
     const enemyId = enemy.getData('id') as string;
     const expReward = enemy.getData('expReward') as number;
+
+    // Death dust effect
+    this.createDeathDustEffect(enemy.x, enemy.y);
 
     // Remove HP bar
     this.removeHpBar(enemyId);
@@ -1283,27 +3310,64 @@ export class MainScene extends Phaser.Scene {
   }
 
   private spawnResource(x: number, y: number, type: string, amount: number): void {
-    const textureName = `${type}_placeholder`;
+    // Map resource type to Tiny Swords sprites
+    const resourceSpriteMap: Record<string, string> = {
+      scrap: 'resource_meat',
+      polymer: 'resource_wood',
+      gems: 'resource_gold',
+      souls: 'skull_idle', // Use spritesheet with first frame
+    };
+    const textureName = resourceSpriteMap[type] || `${type}_placeholder`;
     const resource = this.physics.add.sprite(x, y, textureName);
+
+    // For souls (skull), set specific frame since it's a spritesheet
+    if (type === 'souls') {
+      resource.setFrame(0);
+      resource.setScale(0.25); // Skull is 192x192
+    } else {
+      // Scale resources appropriately (Tiny Swords resources are ~128x128)
+      resource.setScale(0.4);
+    }
     resource.setData('resourceType', type);
     resource.setData('amount', amount);
+    resource.setData('canBeMagnetized', false); // Can't be magnetized until scatter is done
     resource.setDepth(3);
 
-    // Add slight bounce animation
+    // Random scatter direction and distance (farther than before)
+    const scatterAngle = Phaser.Math.FloatBetween(0, Math.PI * 2);
+    const scatterDistance = Phaser.Math.Between(40, 80); // Farther scatter distance
+    const targetX = x + Math.cos(scatterAngle) * scatterDistance;
+    const targetY = y + Math.sin(scatterAngle) * scatterDistance;
+
+    // Scatter animation with arc
+    const scatterDuration = 400;
     this.tweens.add({
       targets: resource,
-      y: y - 10,
-      duration: 200,
+      x: targetX,
+      duration: scatterDuration,
+      ease: 'Quad.easeOut',
+    });
+    this.tweens.add({
+      targets: resource,
+      y: targetY - 30, // Arc up
+      duration: scatterDuration / 2,
+      ease: 'Quad.easeOut',
       yoyo: true,
-      ease: 'Bounce.easeOut',
+      onComplete: () => {
+        // After scatter, enable magnetization
+        if (resource.active) {
+          resource.setData('canBeMagnetized', true);
+        }
+      },
     });
 
-    // Resource magnet effect - move toward player if close
+    // Resource magnet effect - move toward player if close AND scatter is done
     this.time.addEvent({
       delay: 100,
       loop: true,
       callback: () => {
         if (!resource.active) return;
+        if (!resource.getData('canBeMagnetized')) return; // Wait for scatter to finish
 
         const distance = Phaser.Math.Distance.Between(
           resource.x,
@@ -1338,12 +3402,30 @@ export class MainScene extends Phaser.Scene {
   }
 
   private createCorpse(x: number, y: number, originalId: string): void {
-    const corpse = this.physics.add.sprite(x, y, 'corpse_placeholder');
+    // Use dead knight sprite for corpses
+    const textureName = this.textures.exists('enemy_dead') ? 'enemy_dead' : 'corpse_placeholder';
+    const corpse = this.physics.add.sprite(x, y, textureName);
     corpse.setData('type', 'corpse');
     corpse.setData('originalId', originalId);
     corpse.setData('soulValue', 1);
     corpse.setDepth(2);
-    corpse.setAlpha(0.8);
+    corpse.setScale(0.5); // Scale for dead knight sprite (128x128)
+
+    // Spawn animation: scale up from 0 with slight bounce
+    corpse.setScale(0);
+    corpse.setAlpha(0);
+    this.tweens.add({
+      targets: corpse,
+      scale: 0.5,
+      alpha: 0.9,
+      duration: 300,
+      ease: 'Back.easeOut',
+    });
+
+    // Play dead knight animation if available
+    if (this.anims.exists('enemy_dead_anim')) {
+      corpse.play('enemy_dead_anim');
+    }
 
     // Destroy after lifetime
     this.time.delayedCall(GAME_CONFIG.CORPSE_LIFETIME, () => {
@@ -1352,6 +3434,7 @@ export class MainScene extends Phaser.Scene {
         this.tweens.add({
           targets: corpse,
           alpha: 0,
+          scale: 0.2,
           duration: 500,
           onComplete: () => corpse.destroy(),
         });
@@ -1368,9 +3451,41 @@ export class MainScene extends Phaser.Scene {
 
       if (state === 'dead') return;
 
+      // Check stun status
+      const isStunned = sprite.getData('isStunned') as boolean;
+      if (isStunned) {
+        const stunEndTime = sprite.getData('stunEndTime') as number;
+        if (time >= stunEndTime) {
+          sprite.setData('isStunned', false);
+          const enemyType = sprite.getData('enemyType') as EnemyType;
+          this.setEnemyTint(sprite, enemyType);
+        } else {
+          // Stunned - can't do anything
+          sprite.setVelocity(0, 0);
+          return;
+        }
+      }
+
+      // Check mind control status
+      const isMindControlled = sprite.getData('isMindControlled') as boolean;
+      if (isMindControlled) {
+        const mindControlEndTime = sprite.getData('mindControlEndTime') as number;
+        if (time >= mindControlEndTime) {
+          sprite.setData('isMindControlled', false);
+          const enemyType = sprite.getData('enemyType') as EnemyType;
+          this.setEnemyTint(sprite, enemyType);
+        } else {
+          // Mind controlled - attack other enemies
+          this.updateMindControlledEnemy(sprite, time);
+          return;
+        }
+      }
+
       const aggroRadius = sprite.getData('aggroRadius') as number;
       const attackRange = sprite.getData('attackRange') as number;
       const moveSpeed = sprite.getData('moveSpeed') as number;
+      const behavior = sprite.getData('behavior') as EnemyBehavior;
+      const attackType = sprite.getData('attackType') as string || 'melee';
 
       // Find nearest target (player or unit)
       let nearestTarget: Phaser.Physics.Arcade.Sprite | null = null;
@@ -1403,12 +3518,44 @@ export class MainScene extends Phaser.Scene {
       // Store current target
       sprite.setData('currentTarget', nearestTarget);
 
-      // State machine
+      // State machine with behavior modifiers
       switch (state) {
         case 'idle':
           sprite.setVelocity(0, 0);
           if (nearestTarget && nearestDistance < aggroRadius) {
-            sprite.setData('state', 'chase' as EnemyState);
+            // Cowards flee instead of chasing
+            if (behavior === 'coward') {
+              sprite.setData('state', 'flee' as EnemyState);
+            } else {
+              sprite.setData('state', 'chase' as EnemyState);
+            }
+          }
+          break;
+
+        case 'flee':
+          // Coward behavior - run away from threats
+          if (!nearestTarget || nearestDistance > aggroRadius * 2) {
+            sprite.setData('state', 'idle' as EnemyState);
+            sprite.setVelocity(0, 0);
+          } else {
+            // Run away from target
+            const fleeAngle = Phaser.Math.Angle.Between(
+              nearestTarget.x,
+              nearestTarget.y,
+              sprite.x,
+              sprite.y
+            );
+            sprite.setVelocity(
+              Math.cos(fleeAngle) * moveSpeed * 1.2, // Run faster when fleeing
+              Math.sin(fleeAngle) * moveSpeed * 1.2
+            );
+            sprite.setFlipX(nearestTarget.x > sprite.x);
+
+            // If cornered (at world bounds), turn and fight
+            const body = sprite.body as Phaser.Physics.Arcade.Body;
+            if (body.blocked.left || body.blocked.right || body.blocked.up || body.blocked.down) {
+              sprite.setData('state', 'attack' as EnemyState);
+            }
           }
           break;
 
@@ -1420,14 +3567,29 @@ export class MainScene extends Phaser.Scene {
             sprite.setData('state', 'attack' as EnemyState);
             sprite.setVelocity(0, 0);
           } else {
-            // Move toward target
-            const angle = Phaser.Math.Angle.Between(
-              sprite.x,
-              sprite.y,
-              nearestTarget.x,
-              nearestTarget.y
-            );
-            sprite.setVelocity(Math.cos(angle) * moveSpeed, Math.sin(angle) * moveSpeed);
+            // Ranged enemies try to maintain distance
+            if (attackType === 'ranged' && nearestDistance < attackRange * 0.5) {
+              // Too close - back away
+              const retreatAngle = Phaser.Math.Angle.Between(
+                nearestTarget.x,
+                nearestTarget.y,
+                sprite.x,
+                sprite.y
+              );
+              sprite.setVelocity(
+                Math.cos(retreatAngle) * moveSpeed * 0.8,
+                Math.sin(retreatAngle) * moveSpeed * 0.8
+              );
+            } else {
+              // Move toward target
+              const angle = Phaser.Math.Angle.Between(
+                sprite.x,
+                sprite.y,
+                nearestTarget.x,
+                nearestTarget.y
+              );
+              sprite.setVelocity(Math.cos(angle) * moveSpeed, Math.sin(angle) * moveSpeed);
+            }
 
             // Face target
             sprite.setFlipX(nearestTarget.x < sprite.x);
@@ -1435,7 +3597,23 @@ export class MainScene extends Phaser.Scene {
           break;
 
         case 'attack':
-          sprite.setVelocity(0, 0);
+          // Ranged units can attack while moving back slightly
+          if (attackType === 'ranged' && nearestTarget && nearestDistance < attackRange * 0.4) {
+            // Back away while attacking
+            const retreatAngle = Phaser.Math.Angle.Between(
+              nearestTarget.x,
+              nearestTarget.y,
+              sprite.x,
+              sprite.y
+            );
+            sprite.setVelocity(
+              Math.cos(retreatAngle) * moveSpeed * 0.5,
+              Math.sin(retreatAngle) * moveSpeed * 0.5
+            );
+          } else {
+            sprite.setVelocity(0, 0);
+          }
+
           if (!nearestTarget || nearestDistance > attackRange * 1.2) {
             sprite.setData('state', 'chase' as EnemyState);
           } else {
@@ -1443,42 +3621,473 @@ export class MainScene extends Phaser.Scene {
           }
           break;
       }
+
+      // Separation behavior: push apart from nearby enemies
+      this.applyEnemySeparation(sprite);
     });
+  }
+
+  private applyEnemySeparation(sprite: Phaser.Physics.Arcade.Sprite): void {
+    const separationRadius = 30;
+    const separationForce = 20;
+
+    this.enemies.getChildren().forEach((otherObj) => {
+      const other = otherObj as Phaser.Physics.Arcade.Sprite;
+      if (other === sprite || other.getData('state') === 'dead') return;
+
+      const dx = sprite.x - other.x;
+      const dy = sprite.y - other.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < separationRadius && distance > 0) {
+        // Normalize and apply separation
+        const factor = (separationRadius - distance) / separationRadius;
+        const body = sprite.body as Phaser.Physics.Arcade.Body;
+        body.velocity.x += (dx / distance) * separationForce * factor;
+        body.velocity.y += (dy / distance) * separationForce * factor;
+      }
+    });
+  }
+
+  private updateMindControlledEnemy(sprite: Phaser.Physics.Arcade.Sprite, time: number): void {
+    const attackRange = sprite.getData('attackRange') as number;
+    const moveSpeed = sprite.getData('moveSpeed') as number;
+    const aggroRadius = sprite.getData('aggroRadius') as number;
+
+    // Find nearest non-controlled enemy to attack
+    let nearestEnemy: Phaser.Physics.Arcade.Sprite | null = null;
+    let nearestDistance = aggroRadius * 2;
+
+    this.enemies.getChildren().forEach((enemyObj) => {
+      const enemy = enemyObj as Phaser.Physics.Arcade.Sprite;
+      if (enemy === sprite) return; // Don't target self
+      if (enemy.getData('state') === 'dead') return;
+      if (enemy.getData('isMindControlled')) return; // Don't target other controlled enemies
+
+      const dist = Phaser.Math.Distance.Between(sprite.x, sprite.y, enemy.x, enemy.y);
+      if (dist < nearestDistance) {
+        nearestDistance = dist;
+        nearestEnemy = enemy;
+      }
+    });
+
+    if (nearestEnemy) {
+      const target = nearestEnemy as Phaser.Physics.Arcade.Sprite;
+      if (nearestDistance <= attackRange) {
+        // Attack
+        sprite.setVelocity(0, 0);
+        this.mindControlledEnemyAttack(sprite, target, time);
+      } else {
+        // Chase
+        const angle = Phaser.Math.Angle.Between(
+          sprite.x,
+          sprite.y,
+          target.x,
+          target.y
+        );
+        sprite.setVelocity(Math.cos(angle) * moveSpeed, Math.sin(angle) * moveSpeed);
+        sprite.setFlipX(target.x < sprite.x);
+      }
+    } else {
+      // No targets - follow player
+      const playerDistance = Phaser.Math.Distance.Between(sprite.x, sprite.y, this.player.x, this.player.y);
+      if (playerDistance > 100) {
+        const angle = Phaser.Math.Angle.Between(sprite.x, sprite.y, this.player.x, this.player.y);
+        sprite.setVelocity(Math.cos(angle) * moveSpeed * 0.5, Math.sin(angle) * moveSpeed * 0.5);
+      } else {
+        sprite.setVelocity(0, 0);
+      }
+    }
+  }
+
+  private mindControlledEnemyAttack(attacker: Phaser.Physics.Arcade.Sprite, target: Phaser.Physics.Arcade.Sprite, time: number): void {
+    const attackSpeed = attacker.getData('attackSpeed') as number;
+    const lastAttackTime = attacker.getData('lastAttackTime') as number;
+    const attackCooldown = 1000 / attackSpeed;
+
+    if (time - lastAttackTime < attackCooldown) return;
+
+    const damage = attacker.getData('damage') as number;
+    attacker.setData('lastAttackTime', time);
+
+    // Deal damage to target enemy
+    this.dealDamageToEnemy(target, damage);
+
+    // Visual feedback
+    attacker.setTint(0xffaaff); // Pink-purple flash
+    this.time.delayedCall(100, () => {
+      if (attacker.active && attacker.getData('isMindControlled')) {
+        attacker.setTint(0xaa66ff); // Back to controlled purple
+      }
+    });
+
+    // Attack line
+    this.showDustEffect(target.x, target.y);
   }
 
   private enemyAttack(enemy: Phaser.Physics.Arcade.Sprite, target: Phaser.Physics.Arcade.Sprite, time: number): void {
     const attackSpeed = enemy.getData('attackSpeed') as number;
     const lastAttackTime = enemy.getData('lastAttackTime') as number;
     const attackCooldown = 1000 / attackSpeed;
+    const enemyType = enemy.getData('enemyType') as EnemyType;
 
     if (time - lastAttackTime < attackCooldown) {
       return;
     }
 
     const damage = enemy.getData('damage') as number;
+    const attackType = enemy.getData('attackType') as string || 'melee';
     enemy.setData('lastAttackTime', time);
 
-    // Check if target is player or unit
-    const targetType = target.getData('type') as string;
-    if (targetType === 'player') {
-      this.dealDamageToPlayer(damage, enemy);
-    } else if (targetType === 'unit') {
-      this.dealDamageToUnit(target, damage);
+    // Stop moving during attack
+    enemy.setVelocity(0, 0);
+
+    // Play attack animation
+    const attackAnimKey = `${enemyType}_attack`;
+    if (this.anims.exists(attackAnimKey)) {
+      enemy.play(attackAnimKey, true);
+      // Return to idle after attack animation
+      enemy.once('animationcomplete', () => {
+        if (enemy.active) {
+          const idleAnimKey = `${enemyType}_idle`;
+          if (this.anims.exists(idleAnimKey)) {
+            enemy.play(idleAnimKey, true);
+          }
+        }
+      });
     }
 
-    // Visual feedback
-    enemy.setTint(0xffff00);
-    this.time.delayedCall(100, () => {
-      if (enemy.active) {
-        enemy.clearTint();
+    // Create dust effect on attack
+    this.createAttackDustEffect(enemy.x, enemy.y);
+
+    // Ranged enemies fire projectiles
+    if (attackType === 'ranged') {
+      // Monk (hunter_rifle) uses fire projectile, Archer uses arrow
+      if (enemyType === 'hunter_rifle') {
+        this.fireMonkProjectile(enemy.x, enemy.y, target, damage);
+      } else if (enemyType === 'rogue_crossbow') {
+        // Archer fires an arrow with attack animation
+        this.fireArrowProjectile(enemy.x, enemy.y, target, damage);
+      } else {
+        const projectileColor = 0x66ff66; // Green for others
+        this.fireProjectile(enemy.x, enemy.y, target, damage, projectileColor, 'enemy');
       }
+    } else {
+      // Melee instant damage
+      const targetType = target.getData('type') as string;
+      if (targetType === 'player') {
+        this.dealDamageToPlayer(damage, enemy);
+      } else if (targetType === 'unit') {
+        this.dealDamageToUnit(target, damage);
+      }
+      // Flash target to show damage
+      target.setTint(0xff0000);
+      this.time.delayedCall(100, () => {
+        if (target.active) {
+          target.clearTint();
+        }
+      });
+    }
+  }
+
+  private createAttackDustEffect(x: number, y: number): void {
+    if (this.anims.exists('dust_anim')) {
+      const dust = this.add.sprite(x, y + 20, 'effect_dust1');
+      dust.setScale(0.6);
+      dust.setDepth(49);
+      dust.play('dust_anim');
+      dust.once('animationcomplete', () => dust.destroy());
+    }
+  }
+
+  private createDeathDustEffect(x: number, y: number): void {
+    // Create larger dust cloud for death effect
+    if (this.anims.exists('dust_anim')) {
+      // Multiple dust particles spreading out
+      for (let i = 0; i < 3; i++) {
+        const offsetX = Phaser.Math.Between(-15, 15);
+        const offsetY = Phaser.Math.Between(-10, 10);
+        const delay = i * 50;
+
+        this.time.delayedCall(delay, () => {
+          const dust = this.add.sprite(x + offsetX, y + offsetY, 'effect_dust1');
+          dust.setScale(0.8);
+          dust.setDepth(49);
+          dust.setAlpha(0.9);
+          dust.play('dust_anim');
+          dust.once('animationcomplete', () => dust.destroy());
+        });
+      }
+    }
+  }
+
+  private fireProjectile(
+    startX: number,
+    startY: number,
+    target: Phaser.Physics.Arcade.Sprite,
+    damage: number,
+    color: number,
+    sourceType: 'enemy' | 'unit'
+  ): void {
+    // Create projectile sprite
+    const projectile = this.add.circle(startX, startY, 4, color);
+    projectile.setDepth(50);
+
+    // Calculate travel time based on distance
+    const distance = Phaser.Math.Distance.Between(startX, startY, target.x, target.y);
+    const travelTime = Math.min(500, distance * 1.5); // Faster for closer targets
+
+    // Store target reference for damage application
+    const targetRef = target;
+    const targetType = target.getData('type') as string;
+
+    // Animate projectile flying to target
+    this.tweens.add({
+      targets: projectile,
+      x: target.x,
+      y: target.y,
+      duration: travelTime,
+      ease: 'Linear',
+      onComplete: () => {
+        // Apply damage when projectile arrives
+        if (targetRef.active) {
+          if (sourceType === 'enemy') {
+            if (targetType === 'player') {
+              this.dealDamageToPlayer(damage, targetRef);
+            } else if (targetType === 'unit') {
+              this.dealDamageToUnit(targetRef, damage);
+            }
+          } else if (sourceType === 'unit') {
+            this.dealDamageToEnemy(targetRef, damage);
+          }
+        }
+        // Impact effect
+        this.createImpactEffect(projectile.x, projectile.y, color);
+        projectile.destroy();
+      },
+    });
+  }
+
+  private createImpactEffect(x: number, y: number, color: number): void {
+    const impact = this.add.circle(x, y, 6, color, 0.8);
+    impact.setDepth(50);
+
+    this.tweens.add({
+      targets: impact,
+      scaleX: 2,
+      scaleY: 2,
+      alpha: 0,
+      duration: 150,
+      onComplete: () => impact.destroy(),
+    });
+  }
+
+  private fireMonkProjectile(
+    startX: number,
+    startY: number,
+    target: Phaser.Physics.Arcade.Sprite,
+    damage: number
+  ): void {
+    // Create fire sprite projectile for Monk
+    let projectile: Phaser.GameObjects.Sprite | Phaser.GameObjects.Arc;
+
+    if (this.anims.exists('fire_anim')) {
+      projectile = this.add.sprite(startX, startY, 'effect_fire1');
+      (projectile as Phaser.GameObjects.Sprite).play('fire_anim');
+      projectile.setScale(0.8);
+    } else {
+      // Fallback to orange circle if fire animation not available
+      projectile = this.add.circle(startX, startY, 6, 0xffaa00);
+    }
+    projectile.setDepth(50);
+
+    // Calculate travel time based on distance
+    const distance = Phaser.Math.Distance.Between(startX, startY, target.x, target.y);
+    const travelTime = Math.min(600, distance * 1.8); // Slightly slower for dramatic effect
+
+    // Store target reference for damage application
+    const targetRef = target;
+    const targetType = target.getData('type') as string;
+
+    // Animate projectile flying to target
+    this.tweens.add({
+      targets: projectile,
+      x: target.x,
+      y: target.y,
+      duration: travelTime,
+      ease: 'Linear',
+      onComplete: () => {
+        // Apply damage when projectile arrives
+        if (targetRef.active) {
+          if (targetType === 'player') {
+            this.dealDamageToPlayer(damage, targetRef);
+          } else if (targetType === 'unit') {
+            this.dealDamageToUnit(targetRef, damage);
+          }
+        }
+        // Create explosion effect on impact
+        this.createFireImpactEffect(projectile.x, projectile.y);
+        projectile.destroy();
+      },
+    });
+  }
+
+  private createFireImpactEffect(x: number, y: number): void {
+    // Try to use explosion animation, fallback to simple effect
+    if (this.anims.exists('explosion_anim')) {
+      const explosion = this.add.sprite(x, y, 'effect_explosion1');
+      explosion.setScale(0.4);
+      explosion.setDepth(51);
+      explosion.play('explosion_anim');
+      explosion.once('animationcomplete', () => explosion.destroy());
+    } else {
+      // Fallback orange impact
+      const impact = this.add.circle(x, y, 12, 0xff6600, 0.9);
+      impact.setDepth(51);
+      this.tweens.add({
+        targets: impact,
+        scaleX: 2.5,
+        scaleY: 2.5,
+        alpha: 0,
+        duration: 250,
+        onComplete: () => impact.destroy(),
+      });
+    }
+  }
+
+  private fireArrowProjectile(
+    startX: number,
+    startY: number,
+    target: Phaser.Physics.Arcade.Sprite,
+    damage: number
+  ): void {
+    // Calculate angle to target (for arrow rotation)
+    const angle = Phaser.Math.Angle.Between(startX, startY, target.x, target.y);
+
+    // Create arrow sprite (64x128 spritesheet with 2 frames, arrow points right)
+    let arrow: Phaser.GameObjects.Sprite | Phaser.GameObjects.Arc;
+    const isArrowSprite = this.textures.exists('enemy_archer_arrow');
+    if (isArrowSprite) {
+      arrow = this.add.sprite(startX, startY, 'enemy_archer_arrow', 0); // Use first frame
+      arrow.setScale(0.5);
+      // Start with upward angle (arc start)
+      arrow.setRotation(angle - Math.PI / 4);
+    } else {
+      // Fallback to brown circle
+      arrow = this.add.circle(startX, startY, 5, 0x8b4513);
+    }
+    arrow.setDepth(50);
+
+    // Calculate travel time based on distance
+    const distance = Phaser.Math.Distance.Between(startX, startY, target.x, target.y);
+    const travelTime = Math.min(600, distance * 1.5); // Slightly slower for arc effect
+
+    // Store target position (in case target moves)
+    const targetX = target.x;
+    const targetY = target.y;
+    const targetRef = target;
+    const targetType = target.getData('type') as string;
+
+    // Arc height - higher for longer distances
+    const arcHeight = Math.min(80, distance * 0.3);
+    const midY = Math.min(startY, targetY) - arcHeight;
+
+    // Animate arrow flying in arc
+    this.tweens.add({
+      targets: arrow,
+      x: targetX,
+      duration: travelTime,
+      ease: 'Linear',
     });
 
-    // Attack line - point to actual target
-    this.showAttackLine(enemy.x, enemy.y, target.x, target.y, 0x556b2f);
+    // Y position follows arc (parabola)
+    this.tweens.add({
+      targets: arrow,
+      y: { value: targetY, ease: 'Quad.easeIn' },
+      duration: travelTime,
+      onUpdate: () => {
+        if (isArrowSprite && arrow instanceof Phaser.GameObjects.Sprite) {
+          // Calculate progress
+          const progress = (arrow.x - startX) / (targetX - startX);
+          // Arc formula: y offset based on progress (parabola)
+          const arcOffset = arcHeight * 4 * progress * (1 - progress);
+          const baseY = startY + (targetY - startY) * progress;
+          arrow.y = baseY - arcOffset;
+
+          // Rotate arrow to follow trajectory
+          // Derivative of arc: -arcHeight * 4 * (1 - 2*progress) + slope
+          const slope = (targetY - startY) / (targetX - startX);
+          const arcDerivative = -arcHeight * 4 * (1 - 2 * progress) / (targetX - startX);
+          const trajectoryAngle = Math.atan(slope + arcDerivative);
+          arrow.setRotation(trajectoryAngle + (targetX > startX ? 0 : Math.PI));
+        }
+      },
+      onComplete: () => {
+        // Apply damage when arrow arrives
+        if (targetRef.active) {
+          if (targetType === 'player') {
+            this.dealDamageToPlayer(damage, targetRef);
+          } else if (targetType === 'unit') {
+            this.dealDamageToUnit(targetRef, damage);
+          }
+        }
+
+        // Arrow sticks in ground
+        if (isArrowSprite && arrow instanceof Phaser.GameObjects.Sprite) {
+          // Point downward (stuck in ground)
+          arrow.setRotation(Math.PI / 2);
+          arrow.setDepth(2); // Below entities
+          arrow.setAlpha(0.7);
+
+          // Fade out after a while
+          this.time.delayedCall(3000, () => {
+            if (arrow.active) {
+              this.tweens.add({
+                targets: arrow,
+                alpha: 0,
+                duration: 500,
+                onComplete: () => arrow.destroy(),
+              });
+            }
+          });
+        } else {
+          // Small dust impact for non-sprite arrows
+          this.createArrowImpactEffect(arrow.x, arrow.y);
+          arrow.destroy();
+        }
+      },
+    });
+  }
+
+  private createArrowImpactEffect(x: number, y: number): void {
+    // Small dust puff when arrow hits
+    if (this.anims.exists('dust_anim')) {
+      const dust = this.add.sprite(x, y, 'effect_dust1');
+      dust.setScale(0.5);
+      dust.setDepth(51);
+      dust.play('dust_anim');
+      dust.once('animationcomplete', () => dust.destroy());
+    } else {
+      // Fallback brown impact
+      const impact = this.add.circle(x, y, 6, 0x8b4513, 0.7);
+      impact.setDepth(51);
+      this.tweens.add({
+        targets: impact,
+        scaleX: 1.5,
+        scaleY: 1.5,
+        alpha: 0,
+        duration: 150,
+        onComplete: () => impact.destroy(),
+      });
+    }
   }
 
   private dealDamageToPlayer(damage: number, _source: Phaser.Physics.Arcade.Sprite): void {
+    // Check if player is dead or invincible
+    if (this.player.getData('isDead') || this.player.getData('isInvincible')) {
+      return;
+    }
+
     const currentHealth = this.player.getData('health') as number;
     const maxHealth = this.player.getData('maxHealth') as number;
     const newHealth = Math.max(0, currentHealth - damage);
@@ -1504,6 +4113,9 @@ export class MainScene extends Phaser.Scene {
       this.player.clearTint();
     });
 
+    // Dust effect on damage
+    this.showDustEffect(this.player.x, this.player.y);
+
     // Check death
     if (newHealth <= 0) {
       this.handlePlayerDeath();
@@ -1511,18 +4123,49 @@ export class MainScene extends Phaser.Scene {
   }
 
   private handlePlayerDeath(): void {
+    const deathX = this.player.x;
+    const deathY = this.player.y;
+
     gameEvents.emit('player:died', {
-      position: { x: this.player.x, y: this.player.y },
+      position: { x: deathX, y: deathY },
     });
 
-    // Disable player movement and make semi-transparent
-    this.player.setAlpha(0.3);
-    this.player.setVelocity(0, 0);
-    const body = this.player.body as Phaser.Physics.Arcade.Body;
-    body.enable = false;
+    // Create corpse sprite at death location (visual only, no physics)
+    const corpse = this.add.sprite(deathX, deathY, 'spider_idle_down');
+    corpse.setScale(0.5);
+    corpse.setDepth(5); // Below living entities
+    corpse.setAlpha(0.7);
+    corpse.setTint(0x666666); // Gray tint for corpse
 
-    // Show death text
-    const deathText = this.add.text(this.player.x, this.player.y - 40, 'YOU DIED', {
+    // Create corpse shadow
+    const corpseShadow = this.add.sprite(deathX, deathY, 'spider_idle_shadow_down');
+    corpseShadow.setScale(0.5);
+    corpseShadow.setDepth(4);
+    corpseShadow.setAlpha(0.3);
+
+    // Corpse fades out after 15 seconds
+    this.time.delayedCall(15000, () => {
+      this.tweens.add({
+        targets: [corpse, corpseShadow],
+        alpha: 0,
+        duration: 2000,
+        onComplete: () => {
+          corpse.destroy();
+          corpseShadow.destroy();
+        },
+      });
+    });
+
+    // Immediately hide player and teleport to base
+    this.player.setAlpha(0);
+    this.player.setVelocity(0, 0);
+    this.playerShadow.setAlpha(0);
+
+    // Mark player as dead (enemies should ignore)
+    this.player.setData('isDead', true);
+
+    // Show death text at corpse location
+    const deathText = this.add.text(deathX, deathY - 40, 'YOU DIED', {
       fontFamily: 'Arial',
       fontSize: '24px',
       color: '#ff0000',
@@ -1535,74 +4178,65 @@ export class MainScene extends Phaser.Scene {
     // Animate death text
     this.tweens.add({
       targets: deathText,
-      y: this.player.y - 80,
+      y: deathY - 80,
       alpha: 0,
       duration: 2000,
       ease: 'Power2',
+      onComplete: () => {
+        deathText.destroy();
+      },
     });
 
-    // Respawn after delay
-    this.time.delayedCall(2500, () => {
-      // Fade out player
+    // Respawn after short delay
+    this.time.delayedCall(1500, () => {
+      // Move to spawn point (base)
+      this.player.setPosition(this.baseCenter.x, this.baseCenter.y + 30);
+      this.updateShadowPosition();
+
+      // Restore health
+      const maxHealth = this.player.getData('maxHealth') as number || GAME_CONFIG.PLAYER_BASE_HEALTH;
+      this.player.setData('health', maxHealth);
+      this.player.setData('isDead', false);
+
+      // Fade in player
       this.tweens.add({
-        targets: this.player,
-        alpha: 0,
-        duration: 300,
+        targets: [this.player, this.playerShadow],
+        alpha: 1,
+        duration: 500,
         onComplete: () => {
-          // Move to spawn point
-          this.player.setPosition(this.baseCenter.x, this.baseCenter.y + 50);
-
-          // Restore health
-          this.player.setData('health', GAME_CONFIG.PLAYER_BASE_HEALTH);
-
-          // Re-enable physics
-          body.enable = true;
-
-          // Fade in with invincibility effect
+          // Brief invincibility flash
+          this.player.setData('isInvincible', true);
           this.tweens.add({
             targets: this.player,
-            alpha: 1,
-            duration: 500,
+            alpha: 0.5,
+            duration: 100,
+            yoyo: true,
+            repeat: 10,
             onComplete: () => {
-              // Brief invincibility flash effect
-              this.tweens.add({
-                targets: this.player,
-                alpha: 0.5,
-                duration: 100,
-                yoyo: true,
-                repeat: 5,
-                onComplete: () => {
-                  this.player.setAlpha(1);
-                },
-              });
+              this.player.setAlpha(1);
+              this.player.setData('isInvincible', false);
             },
           });
-
-          // Emit health restored
-          gameEvents.emit('player:health-changed', {
-            current: GAME_CONFIG.PLAYER_BASE_HEALTH,
-            max: GAME_CONFIG.PLAYER_BASE_HEALTH,
-          });
-
-          // Clean up death text
-          deathText.destroy();
         },
+      });
+
+      // Emit health restored
+      gameEvents.emit('player:health-changed', {
+        current: maxHealth,
+        max: maxHealth,
       });
     });
   }
 
-  private showAttackLine(x1: number, y1: number, x2: number, y2: number, color: number): void {
-    const line = this.add.graphics();
-    line.lineStyle(2, color, 0.8);
-    line.lineBetween(x1, y1, x2, y2);
-    line.setDepth(100);
-
-    this.tweens.add({
-      targets: line,
-      alpha: 0,
-      duration: 150,
-      onComplete: () => line.destroy(),
-    });
+  private showDustEffect(x: number, y: number): void {
+    if (this.anims.exists('dust_anim')) {
+      const dust = this.add.sprite(x, y, 'effect_dust1');
+      dust.setScale(0.6);
+      dust.setDepth(52);
+      dust.setAlpha(0.8);
+      dust.play('dust_anim');
+      dust.once('animationcomplete', () => dust.destroy());
+    }
   }
 
   private showFloatingText(x: number, y: number, text: string, color: number): void {
@@ -1959,7 +4593,24 @@ export class MainScene extends Phaser.Scene {
     const spawnY = this.player.y + Math.sin(angle) * distance;
 
     const unitId = `unit_${this.unitIdCounter++}`;
-    const unit = this.physics.add.sprite(spawnX, spawnY, 'unit_placeholder');
+
+    // Use Tiny Swords sprite if available, otherwise fallback to placeholder
+    const spriteKey = config.sprites?.idle || 'unit_placeholder';
+    const unit = this.physics.add.sprite(spawnX, spawnY, spriteKey);
+
+    // Create animations for this unit type if sprites are configured
+    if (config.sprites) {
+      this.createUnitAnimations(unitType, config);
+      const idleAnimKey = `${unitType}_idle`;
+      if (this.anims.exists(idleAnimKey)) {
+        unit.play(idleAnimKey);
+      }
+    }
+
+    // Apply scale from config
+    if (config.scale) {
+      unit.setScale(config.scale);
+    }
 
     // Set unit data
     unit.setData('type', 'unit');
@@ -1972,6 +4623,7 @@ export class MainScene extends Phaser.Scene {
     unit.setData('attackRange', config.attackRange);
     unit.setData('moveSpeed', config.moveSpeed);
     unit.setData('attackType', config.attackType);
+    unit.setData('specialAbility', 'specialAbility' in config ? config.specialAbility : undefined);
     unit.setData('lastAttackTime', 0);
     unit.setData('state', 'follow' as UnitState);
     unit.setData('currentTarget', null);
@@ -1995,19 +4647,81 @@ export class MainScene extends Phaser.Scene {
     // Emit army update
     gameEvents.emit('army:updated', { count: this.armySize, limit: this.maxArmySize });
 
+    // Emit unit produced event for quest tracking
+    gameEvents.emit('unit:produced', { unitType, unitId });
+
     // Show spawn effect
+    // Set visual tint based on unit type
+    this.setUnitTint(unit, unitType);
+
     this.showFloatingText(spawnX, spawnY - 20, `+${config.name}`, 0x6a5acd);
 
     // Spawn animation
+    const targetScale = config.scale || 1;
     unit.setAlpha(0);
-    unit.setScale(0.5);
+    unit.setScale(targetScale * 0.5);
     this.tweens.add({
       targets: unit,
       alpha: 1,
-      scale: 1,
+      scale: targetScale,
       duration: 300,
       ease: 'Back.easeOut',
     });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  private setUnitTint(unit: Phaser.Physics.Arcade.Sprite, _unitType: string): void {
+    // Reset tint (now using real sprites, no tint needed for normal state)
+    unit.clearTint();
+  }
+
+  private createUnitAnimations(unitType: string, config: typeof UNIT_CONFIGS[keyof typeof UNIT_CONFIGS]): void {
+    if (!config.sprites) return;
+
+    // Tiny Swords spritesheets have 6 frames in a row
+    // Use slower frameRate for better visual perception
+    const IDLE_FRAME_RATE = 4;
+    const RUN_FRAME_RATE = 5;
+    const ATTACK_FRAME_RATE = 6;
+
+    // Create idle animation
+    const idleAnimKey = `${unitType}_idle`;
+    if (!this.anims.exists(idleAnimKey) && this.textures.exists(config.sprites.idle)) {
+      const texture = this.textures.get(config.sprites.idle);
+      const frameCount = texture.frameTotal - 1; // frameTotal includes __BASE, subtract 1
+      this.anims.create({
+        key: idleAnimKey,
+        frames: this.anims.generateFrameNumbers(config.sprites.idle, { start: 0, end: Math.max(0, frameCount - 1) }),
+        frameRate: IDLE_FRAME_RATE,
+        repeat: -1
+      });
+    }
+
+    // Create run animation
+    const runAnimKey = `${unitType}_run`;
+    if (!this.anims.exists(runAnimKey) && this.textures.exists(config.sprites.run)) {
+      const texture = this.textures.get(config.sprites.run);
+      const frameCount = texture.frameTotal - 1;
+      this.anims.create({
+        key: runAnimKey,
+        frames: this.anims.generateFrameNumbers(config.sprites.run, { start: 0, end: Math.max(0, frameCount - 1) }),
+        frameRate: RUN_FRAME_RATE,
+        repeat: -1
+      });
+    }
+
+    // Create attack animation
+    const attackAnimKey = `${unitType}_attack`;
+    if (!this.anims.exists(attackAnimKey) && this.textures.exists(config.sprites.attack)) {
+      const texture = this.textures.get(config.sprites.attack);
+      const frameCount = texture.frameTotal - 1;
+      this.anims.create({
+        key: attackAnimKey,
+        frames: this.anims.generateFrameNumbers(config.sprites.attack, { start: 0, end: Math.max(0, frameCount - 1) }),
+        frameRate: ATTACK_FRAME_RATE,
+        repeat: 0
+      });
+    }
   }
 
   private updateUnits(time: number): void {
@@ -2028,7 +4742,7 @@ export class MainScene extends Phaser.Scene {
         this.player.y
       );
 
-      // Find nearest enemy
+      // Find nearest enemy (priority target)
       let nearestEnemy: Phaser.Physics.Arcade.Sprite | null = null;
       let nearestEnemyDistance: number = GAME_CONFIG.UNIT_AGGRO_RADIUS;
 
@@ -2043,6 +4757,36 @@ export class MainScene extends Phaser.Scene {
         }
       });
 
+      // Find nearest structure (secondary target) if no enemies
+      let nearestStructure: Phaser.Physics.Arcade.Sprite | null = null;
+      let nearestStructureDistance: number = GAME_CONFIG.UNIT_AGGRO_RADIUS;
+
+      if (!nearestEnemy) {
+        // Check towers
+        this.towers.getChildren().forEach((towerObj) => {
+          const tower = towerObj as Phaser.Physics.Arcade.Sprite;
+          if (tower.getData('state') === 'destroyed') return;
+
+          const distance = Phaser.Math.Distance.Between(unit.x, unit.y, tower.x, tower.y);
+          if (distance < nearestStructureDistance) {
+            nearestStructureDistance = distance;
+            nearestStructure = tower;
+          }
+        });
+
+        // Check houses
+        this.houses.getChildren().forEach((houseObj) => {
+          const house = houseObj as Phaser.Physics.Arcade.Sprite;
+          if (house.getData('state') === 'destroyed') return;
+
+          const distance = Phaser.Math.Distance.Between(unit.x, unit.y, house.x, house.y);
+          if (distance < nearestStructureDistance) {
+            nearestStructureDistance = distance;
+            nearestStructure = house;
+          }
+        });
+      }
+
       // State machine
       switch (state) {
         case 'follow':
@@ -2052,10 +4796,17 @@ export class MainScene extends Phaser.Scene {
             break;
           }
 
-          // If enemy in range, attack
+          // If enemy in range, attack (priority)
           if (nearestEnemy && nearestEnemyDistance < GAME_CONFIG.UNIT_AGGRO_RADIUS) {
             unit.setData('state', 'attack' as UnitState);
             unit.setData('currentTarget', nearestEnemy);
+            break;
+          }
+
+          // If structure in range, attack (secondary)
+          if (nearestStructure && nearestStructureDistance < GAME_CONFIG.UNIT_AGGRO_RADIUS) {
+            unit.setData('state', 'attack' as UnitState);
+            unit.setData('currentTarget', nearestStructure);
             break;
           }
 
@@ -2073,10 +4824,16 @@ export class MainScene extends Phaser.Scene {
 
           // Check if current target is still valid
           const currentTarget = unit.getData('currentTarget') as Phaser.Physics.Arcade.Sprite | null;
-          if (!currentTarget || !currentTarget.active || currentTarget.getData('state') === 'dead') {
+          const targetType = currentTarget?.getData('type') as string | undefined;
+          const isValidEnemy = targetType === 'enemy' && currentTarget?.getData('state') !== 'dead';
+          const isValidStructure = (targetType === 'tower' || targetType === 'house') && currentTarget?.getData('state') !== 'destroyed';
+
+          if (!currentTarget || !currentTarget.active || (!isValidEnemy && !isValidStructure)) {
             // Find new target or return to follow
             if (nearestEnemy) {
               unit.setData('currentTarget', nearestEnemy);
+            } else if (nearestStructure) {
+              unit.setData('currentTarget', nearestStructure);
             } else {
               unit.setData('state', 'follow' as UnitState);
               unit.setData('currentTarget', null);
@@ -2088,11 +4845,16 @@ export class MainScene extends Phaser.Scene {
           const target = unit.getData('currentTarget') as Phaser.Physics.Arcade.Sprite;
           if (target && target.active) {
             const distanceToTarget = Phaser.Math.Distance.Between(unit.x, unit.y, target.x, target.y);
+            const targetTypeForAttack = target.getData('type') as string;
 
             if (distanceToTarget <= attackRange) {
               // In range - attack
               unit.setVelocity(0, 0);
-              this.unitAttack(unit, target, time);
+              if (targetTypeForAttack === 'enemy') {
+                this.unitAttack(unit, target, time);
+              } else {
+                this.unitAttackStructure(unit, target, time);
+              }
             } else {
               // Move toward target
               const angle = Phaser.Math.Angle.Between(unit.x, unit.y, target.x, target.y);
@@ -2115,6 +4877,112 @@ export class MainScene extends Phaser.Scene {
           unit.setFlipX(this.player.x < unit.x);
           break;
       }
+    });
+  }
+
+  private updateTowers(time: number): void {
+    this.towers.getChildren().forEach((towerObj) => {
+      const tower = towerObj as Phaser.Physics.Arcade.Sprite;
+      const state = tower.getData('state') as StructureState;
+
+      if (state === 'destroyed') return;
+
+      const attackRange = tower.getData('attackRange') as number;
+      const damage = tower.getData('damage') as number;
+      const attackSpeed = tower.getData('attackSpeed') as number;
+      const lastAttackTime = tower.getData('lastAttackTime') as number;
+      const attackCooldown = 1000 / attackSpeed;
+
+      if (time - lastAttackTime < attackCooldown) return;
+
+      // Find nearest target (player or unit)
+      let nearestTarget: Phaser.Physics.Arcade.Sprite | null = null;
+      let nearestDistance = attackRange;
+
+      // Check player
+      const playerDist = Phaser.Math.Distance.Between(tower.x, tower.y, this.player.x, this.player.y);
+      if (playerDist < nearestDistance) {
+        nearestDistance = playerDist;
+        nearestTarget = this.player;
+      }
+
+      // Check units
+      this.units.getChildren().forEach((unitObj) => {
+        const unit = unitObj as Phaser.Physics.Arcade.Sprite;
+        if (unit.getData('state') === 'dead') return;
+
+        const unitDist = Phaser.Math.Distance.Between(tower.x, tower.y, unit.x, unit.y);
+        if (unitDist < nearestDistance) {
+          nearestDistance = unitDist;
+          nearestTarget = unit;
+        }
+      });
+
+      // Attack if target found
+      if (nearestTarget) {
+        tower.setData('lastAttackTime', time);
+
+        // Fire projectile
+        this.fireProjectile(tower.x, tower.y - 20, nearestTarget, damage, 0xff4444, 'enemy');
+
+        // Visual feedback - flash red then return to normal
+        tower.setTint(0xff6644);
+        this.time.delayedCall(100, () => {
+          if (tower.active && tower.getData('state') === 'active') {
+            tower.clearTint(); // Return to normal sprite color
+          }
+        });
+      }
+    });
+  }
+
+  private updateHouses(time: number): void {
+    this.houses.getChildren().forEach((houseObj) => {
+      const house = houseObj as Phaser.Physics.Arcade.Sprite;
+      const state = house.getData('state') as StructureState;
+
+      if (state === 'destroyed') return;
+
+      const spawnsRemaining = house.getData('spawnsRemaining') as number;
+      const spawnInterval = house.getData('spawnInterval') as number;
+      const lastSpawnTime = house.getData('lastSpawnTime') as number;
+
+      // Check if house can spawn more enemies
+      if (spawnsRemaining <= 0) return;
+      if (time - lastSpawnTime < spawnInterval) return;
+
+      // Check if player is nearby to trigger spawn
+      const distanceToPlayer = Phaser.Math.Distance.Between(house.x, house.y, this.player.x, this.player.y);
+      if (distanceToPlayer > 250) return; // Only spawn when player is close
+
+      // Spawn enemy
+      const spawnTypes = house.getData('spawnTypes') as EnemyType[];
+      const enemyType = spawnTypes[Phaser.Math.Between(0, spawnTypes.length - 1)];
+      const houseId = house.getData('id') as string;
+
+      // Spawn near house
+      const angle = Math.random() * Math.PI * 2;
+      const spawnX = house.x + Math.cos(angle) * 40;
+      const spawnY = house.y + Math.sin(angle) * 40;
+
+      const enemyId = `enemy_${this.enemyIdCounter++}`;
+      const enemy = this.spawnEnemy(spawnX, spawnY, enemyId, enemyType);
+      enemy.setData('houseId', houseId); // Link to house
+
+      // Update house spawn data
+      house.setData('spawnsRemaining', spawnsRemaining - 1);
+      house.setData('lastSpawnTime', time);
+
+      // Visual feedback - house pulses orange then returns to normal
+      house.setTint(0xffaa66);
+      this.time.delayedCall(200, () => {
+        if (house.active && house.getData('state') === 'active') {
+          house.clearTint(); // Return to normal sprite color
+        }
+      });
+
+      // Show spawn effect
+      this.showFloatingText(house.x, house.y - 30, 'Enemy spawned!', 0xffaa66);
     });
   }
 
@@ -2145,23 +5013,342 @@ export class MainScene extends Phaser.Scene {
     if (time - lastAttackTime < attackCooldown) return;
 
     const damage = unit.getData('damage') as number;
+    const attackType = unit.getData('attackType') as string || 'melee';
+    const specialAbility = unit.getData('specialAbility') as string | undefined;
+    const unitType = unit.getData('unitType') as string;
     unit.setData('lastAttackTime', time);
 
-    // Deal damage
-    this.dealDamageToEnemy(target, damage);
+    // Stop moving during attack
+    unit.setVelocity(0, 0);
 
-    // Visual feedback - flash unit
+    // Play attack animation
+    const attackAnimKey = `${unitType}_attack`;
+    if (this.anims.exists(attackAnimKey)) {
+      unit.play(attackAnimKey, true);
+      // Return to idle after attack
+      unit.once('animationcomplete', () => {
+        if (unit.active) {
+          const idleAnimKey = `${unitType}_idle`;
+          if (this.anims.exists(idleAnimKey)) {
+            unit.play(idleAnimKey, true);
+          }
+        }
+      });
+    }
+
+    // Create dust effect on attack
+    this.createAttackDustEffect(unit.x, unit.y);
+
+    // Apply special abilities
+    if (specialAbility) {
+      this.applyUnitSpecialAbility(unit, target, damage, specialAbility, time);
+    }
+
+    // Ranged units fire projectiles
+    if (attackType === 'ranged') {
+      // Chica shoots yellow with AoE, Puppet shoots purple
+      const projectileColor = unitType === 'chica' ? 0xffcc00 : 0xaa66ff;
+
+      if (specialAbility === 'aoe') {
+        // Chica's AoE projectile
+        this.fireAoEProjectile(unit.x, unit.y, target, damage, projectileColor);
+      } else if (specialAbility === 'mind_control') {
+        // Puppet's mind control projectile
+        this.fireMindControlProjectile(unit.x, unit.y, target, projectileColor);
+      } else {
+        this.fireProjectile(unit.x, unit.y, target, damage, projectileColor, 'unit');
+      }
+    } else {
+      // Melee instant damage
+      this.dealDamageToEnemy(target, damage);
+
+      // Bonnie lifesteal - heal unit for portion of damage dealt
+      if (specialAbility === 'lifesteal') {
+        const healAmount = Math.floor(damage * 0.3); // 30% lifesteal
+        const currentHealth = unit.getData('health') as number;
+        const maxHealth = unit.getData('maxHealth') as number;
+        const newHealth = Math.min(maxHealth, currentHealth + healAmount);
+        unit.setData('health', newHealth);
+
+        // Show heal effect
+        this.showFloatingText(unit.x, unit.y - 10, `+${healAmount}`, 0x00ff00);
+
+        // Green flash for lifesteal
+        unit.setTint(0x00ff00);
+        this.time.delayedCall(150, () => {
+          if (unit.active) unit.clearTint();
+        });
+      }
+
+      // Attack line for melee
+      this.showDustEffect(target.x, target.y);
+    }
+  }
+
+  private unitAttackStructure(unit: Phaser.Physics.Arcade.Sprite, structure: Phaser.Physics.Arcade.Sprite, time: number): void {
+    const attackSpeed = unit.getData('attackSpeed') as number;
+    const lastAttackTime = unit.getData('lastAttackTime') as number;
+    const attackCooldown = 1000 / attackSpeed;
+
+    if (time - lastAttackTime < attackCooldown) return;
+
+    const damage = unit.getData('damage') as number;
+    unit.setData('lastAttackTime', time);
+
+    // Deal damage to structure
+    const currentHealth = structure.getData('health') as number;
+    const newHealth = Math.max(0, currentHealth - damage);
+    structure.setData('health', newHealth);
+
+    const maxHealth = structure.getData('maxHealth') as number;
+    const structureId = structure.getData('id') as string;
+    const structureType = structure.getData('type') as string;
+
+    // Emit health changed event for HP bar
+    gameEvents.emit('entity:health-changed', {
+      entityId: structureId,
+      x: structure.x,
+      y: structure.y - 40,
+      current: newHealth,
+      max: maxHealth,
+    });
+
+    // Show damage number
+    gameEvents.emit('combat:damage', {
+      x: structure.x,
+      y: structure.y,
+      damage: damage,
+      isCritical: false,
+    });
+
+    // Visual feedback
     unit.setTint(0xffff00);
     this.time.delayedCall(100, () => {
-      if (unit.active) {
-        unit.clearTint();
+      if (unit.active) unit.clearTint();
+    });
+
+    structure.setTint(0xffffff);
+    this.time.delayedCall(100, () => {
+      if (structure.active && structure.getData('state') === 'active') {
+        if (structureType === 'tower') {
+          structure.setTint(0x8b4513);
+        } else {
+          structure.setTint(0x885533);
+        }
       }
     });
 
-    // Attack line
-    const attackType = unit.getData('attackType') as string;
-    const lineColor = attackType === 'ranged' ? 0x00bfff : 0x6a5acd;
-    this.showAttackLine(unit.x, unit.y, target.x, target.y, lineColor);
+    // Dust effect on hit
+    this.showDustEffect(structure.x, structure.y);
+
+    // Check if structure destroyed
+    if (newHealth <= 0) {
+      this.destroyStructure(structure);
+    }
+  }
+
+  private applyUnitSpecialAbility(
+    _unit: Phaser.Physics.Arcade.Sprite,
+    target: Phaser.Physics.Arcade.Sprite,
+    _damage: number,
+    ability: string,
+    time: number
+  ): void {
+    switch (ability) {
+      case 'stun':
+        // Foxy's stun - 20% chance to stun for 1 second
+        if (Math.random() < 0.2) {
+          const isStunned = target.getData('isStunned') as boolean;
+          if (!isStunned) {
+            target.setData('isStunned', true);
+            target.setData('stunEndTime', time + 1000);
+            target.setTint(0x888888); // Gray tint for stunned
+
+            // Show stun effect
+            this.showFloatingText(target.x, target.y - 20, 'STUNNED!', 0xffff00);
+
+            // Create stun stars effect
+            this.createStunEffect(target);
+          }
+        }
+        break;
+
+      // Lifesteal is handled in the attack itself
+      // AoE and mind_control are handled in projectile methods
+    }
+  }
+
+  private createStunEffect(target: Phaser.Physics.Arcade.Sprite): void {
+    // Create spinning stars around stunned target
+    const stars: Phaser.GameObjects.Text[] = [];
+    for (let i = 0; i < 3; i++) {
+      const star = this.add.text(target.x, target.y - 15, '*', {
+        fontSize: '12px',
+        color: '#ffff00',
+      });
+      star.setOrigin(0.5);
+      star.setDepth(150);
+      stars.push(star);
+    }
+
+    // Animate stars spinning
+    let angle = 0;
+    const spinInterval = this.time.addEvent({
+      delay: 50,
+      callback: () => {
+        if (!target.active || !target.getData('isStunned')) {
+          stars.forEach(s => s.destroy());
+          spinInterval.destroy();
+          return;
+        }
+        angle += 0.2;
+        stars.forEach((star, i) => {
+          const starAngle = angle + (i * Math.PI * 2 / 3);
+          star.x = target.x + Math.cos(starAngle) * 12;
+          star.y = target.y - 15 + Math.sin(starAngle) * 6;
+        });
+      },
+      loop: true,
+    });
+
+    // Cleanup after stun duration
+    this.time.delayedCall(1000, () => {
+      stars.forEach(s => s.destroy());
+      spinInterval.destroy();
+    });
+  }
+
+  private fireAoEProjectile(
+    startX: number,
+    startY: number,
+    target: Phaser.Physics.Arcade.Sprite,
+    damage: number,
+    color: number
+  ): void {
+    // Create larger projectile for AoE
+    const projectile = this.add.circle(startX, startY, 6, color);
+    projectile.setDepth(50);
+
+    const distance = Phaser.Math.Distance.Between(startX, startY, target.x, target.y);
+    const travelTime = Math.min(500, distance * 1.5);
+
+    const targetX = target.x;
+    const targetY = target.y;
+
+    this.tweens.add({
+      targets: projectile,
+      x: targetX,
+      y: targetY,
+      duration: travelTime,
+      ease: 'Linear',
+      onComplete: () => {
+        // AoE explosion - damage all enemies in radius
+        const aoERadius = 60;
+        this.enemies.getChildren().forEach((enemyObj) => {
+          const enemy = enemyObj as Phaser.Physics.Arcade.Sprite;
+          if (enemy.getData('state') === 'dead') return;
+
+          const dist = Phaser.Math.Distance.Between(projectile.x, projectile.y, enemy.x, enemy.y);
+          if (dist <= aoERadius) {
+            // Full damage to primary target, reduced to others
+            const aoeDamage = enemy === target ? damage : Math.floor(damage * 0.5);
+            this.dealDamageToEnemy(enemy, aoeDamage);
+          }
+        });
+
+        // AoE visual effect
+        this.createAoEExplosion(projectile.x, projectile.y, color, aoERadius);
+        projectile.destroy();
+      },
+    });
+  }
+
+  private createAoEExplosion(x: number, y: number, color: number, radius: number): void {
+    const explosion = this.add.circle(x, y, radius, color, 0.3);
+    explosion.setDepth(45);
+
+    const ring = this.add.circle(x, y, radius, color, 0);
+    ring.setStrokeStyle(3, color, 0.8);
+    ring.setDepth(46);
+
+    this.tweens.add({
+      targets: [explosion, ring],
+      scaleX: 1.5,
+      scaleY: 1.5,
+      alpha: 0,
+      duration: 300,
+      onComplete: () => {
+        explosion.destroy();
+        ring.destroy();
+      },
+    });
+  }
+
+  private fireMindControlProjectile(
+    startX: number,
+    startY: number,
+    target: Phaser.Physics.Arcade.Sprite,
+    color: number
+  ): void {
+    // Create swirly projectile for mind control
+    const projectile = this.add.circle(startX, startY, 5, color);
+    projectile.setDepth(50);
+
+    const distance = Phaser.Math.Distance.Between(startX, startY, target.x, target.y);
+    const travelTime = Math.min(600, distance * 2);
+
+    this.tweens.add({
+      targets: projectile,
+      x: target.x,
+      y: target.y,
+      duration: travelTime,
+      ease: 'Sine.easeInOut',
+      onComplete: () => {
+        // 15% chance to convert enemy to temporary ally
+        if (target.active && target.getData('state') !== 'dead') {
+          if (Math.random() < 0.15) {
+            this.applyMindControl(target);
+          } else {
+            // If mind control fails, deal small damage
+            this.dealDamageToEnemy(target, 5);
+          }
+        }
+        this.createImpactEffect(projectile.x, projectile.y, color);
+        projectile.destroy();
+      },
+    });
+  }
+
+  private applyMindControl(enemy: Phaser.Physics.Arcade.Sprite): void {
+    // Mark enemy as mind controlled
+    enemy.setData('isMindControlled', true);
+    enemy.setData('mindControlEndTime', this.time.now + 5000); // 5 seconds
+
+    // Visual indication - purple tint
+    enemy.setTint(0xaa66ff);
+
+    // Show effect
+    this.showFloatingText(enemy.x, enemy.y - 20, 'CONTROLLED!', 0xaa66ff);
+
+    // Create swirl effect
+    this.createMindControlEffect(enemy);
+  }
+
+  private createMindControlEffect(target: Phaser.Physics.Arcade.Sprite): void {
+    const swirl = this.add.circle(target.x, target.y - 10, 8, 0xaa66ff, 0.5);
+    swirl.setDepth(150);
+
+    // Animate swirl
+    this.tweens.add({
+      targets: swirl,
+      scaleX: 0,
+      scaleY: 0,
+      y: target.y - 30,
+      alpha: 0,
+      duration: 500,
+      ease: 'Power2',
+      onComplete: () => swirl.destroy(),
+    });
   }
 
   private dealDamageToUnit(unit: Phaser.Physics.Arcade.Sprite, damage: number): void {
@@ -2196,6 +5383,9 @@ export class MainScene extends Phaser.Scene {
         unit.clearTint();
       }
     });
+
+    // Dust effect on damage
+    this.showDustEffect(unit.x, unit.y);
 
     // Check death
     if (newHealth <= 0) {

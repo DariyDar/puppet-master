@@ -1,5 +1,4 @@
 import Phaser from 'phaser';
-import { getAssetPath } from '../config/PhaserConfig';
 
 export class BootScene extends Phaser.Scene {
   constructor() {
@@ -7,10 +6,7 @@ export class BootScene extends Phaser.Scene {
   }
 
   preload(): void {
-    // Load minimal assets needed for loading screen
-    // Loading bar background and fill
-    this.load.image('loading_bar_bg', getAssetPath('assets/ui/loading_bar_bg.png'));
-    this.load.image('loading_bar_fill', getAssetPath('assets/ui/loading_bar_fill.png'));
+    // No assets needed - LoadingScene draws progress bar programmatically
   }
 
   create(): void {

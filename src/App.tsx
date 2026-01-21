@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import type Phaser from 'phaser';
 import { PhaserGame } from './components/Game';
-import { TopHUD, BottomHUD, WorkbenchPanel, DebugMenu, UpgradePanel } from './components/HUD';
+import { TopHUD, BottomHUD, WorkbenchPanel, DebugMenu, UpgradePanel, QuestHUD } from './components/HUD';
 import { VirtualJoystick } from './components/Controls';
 import './App.css';
 
@@ -36,6 +36,7 @@ const App: React.FC = () => {
         <>
           <TopHUD />
           <BottomHUD />
+          <QuestHUD />
           <WorkbenchPanel />
           <VirtualJoystick />
           <DebugMenu />

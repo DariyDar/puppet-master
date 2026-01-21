@@ -1,7 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import Phaser from 'phaser';
 import { phaserConfig } from '../../game/config/PhaserConfig';
-import { setupStoreListeners } from '../../stores/gameStore';
+import { setupStoreListeners, useGameStore } from '../../stores/gameStore';
+import { questManager } from '../../game/managers/QuestManager';
 
 interface PhaserGameProps {
   onGameReady?: (game: Phaser.Game) => void;
@@ -24,6 +25,20 @@ export const PhaserGame: React.FC<PhaserGameProps> = ({ onGameReady }) => {
 
       // Setup event listeners to sync Phaser events with Zustand store
       setupStoreListeners();
+
+      // Initialize first quest in HUD
+      const quest = questManager.getCurrentQuest();
+      if (quest) {
+        const progress = quest.objectives.reduce((sum, obj) => sum + obj.current, 0);
+        const target = quest.objectives.reduce((sum, obj) => sum + obj.target, 0);
+        useGameStore.getState().updateQuest({
+          id: quest.id,
+          title: quest.title,
+          description: quest.objectives[0]?.description || quest.description,
+          progress,
+          target,
+        });
+      }
 
       if (onGameReady) {
         onGameReady(gameRef.current);

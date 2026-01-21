@@ -103,9 +103,9 @@ export const VirtualJoystick: React.FC<VirtualJoystickProps> = ({
     [handleStart]
   );
 
-  // Touch events
-  const handleTouchStart = useCallback(
-    (e: React.TouchEvent) => {
+  // Touch event handlers (used by native event listeners for non-passive behavior)
+  const handleNativeTouchStart = useCallback(
+    (e: TouchEvent) => {
       e.preventDefault();
       const touch = e.changedTouches[0];
       handleStart(touch.clientX, touch.clientY, touch.identifier);
@@ -113,8 +113,8 @@ export const VirtualJoystick: React.FC<VirtualJoystickProps> = ({
     [handleStart]
   );
 
-  const handleTouchMove = useCallback(
-    (e: React.TouchEvent) => {
+  const handleNativeTouchMove = useCallback(
+    (e: TouchEvent) => {
       e.preventDefault();
       for (let i = 0; i < e.changedTouches.length; i++) {
         const touch = e.changedTouches[i];
@@ -127,8 +127,8 @@ export const VirtualJoystick: React.FC<VirtualJoystickProps> = ({
     [handleMove, touchId]
   );
 
-  const handleTouchEnd = useCallback(
-    (e: React.TouchEvent) => {
+  const handleNativeTouchEnd = useCallback(
+    (e: TouchEvent) => {
       for (let i = 0; i < e.changedTouches.length; i++) {
         if (e.changedTouches[i].identifier === touchId) {
           handleEnd();
@@ -138,6 +138,24 @@ export const VirtualJoystick: React.FC<VirtualJoystickProps> = ({
     },
     [handleEnd, touchId]
   );
+
+  // Add non-passive touch event listeners
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+
+    element.addEventListener('touchstart', handleNativeTouchStart, { passive: false });
+    element.addEventListener('touchmove', handleNativeTouchMove, { passive: false });
+    element.addEventListener('touchend', handleNativeTouchEnd, { passive: false });
+    element.addEventListener('touchcancel', handleNativeTouchEnd, { passive: false });
+
+    return () => {
+      element.removeEventListener('touchstart', handleNativeTouchStart);
+      element.removeEventListener('touchmove', handleNativeTouchMove);
+      element.removeEventListener('touchend', handleNativeTouchEnd);
+      element.removeEventListener('touchcancel', handleNativeTouchEnd);
+    };
+  }, [handleNativeTouchStart, handleNativeTouchMove, handleNativeTouchEnd]);
 
   // Global mouse events for dragging outside component
   useEffect(() => {
@@ -182,10 +200,6 @@ export const VirtualJoystick: React.FC<VirtualJoystickProps> = ({
         zIndex: 1000,
       }}
       onMouseDown={handleMouseDown}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
-      onTouchCancel={handleTouchEnd}
     >
       {/* Stick */}
       <div

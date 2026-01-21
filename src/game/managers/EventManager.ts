@@ -8,7 +8,7 @@ export interface GameEventMap {
   'player:health-changed': { current: number; max: number };
   'player:died': { position: { x: number; y: number } };
   'player:level-up': { newLevel: number };
-  'player:exp-gained': { amount: number; total: number; toNext: number };
+  'player:exp-gained': { amount: number; total?: number; toNext?: number };
   'player:upgrade-purchased': { upgradeId: string; newLevel: number };
 
   // Joystick events (React -> Phaser)
@@ -74,6 +74,11 @@ export interface GameEventMap {
   'location:changed': { from: string; to: string };
   'location:transition-start': { target: string };
   'location:transition-complete': { location: string };
+  'zone:changed': { zone: number };
+
+  // Structure events
+  'structure:destroyed': { structureType: string; structureId: string; position: { x: number; y: number } };
+  'resources:collected': { type: string; amount: number; fromFarm?: boolean };
 
   // UI events
   'ui:open-modal': { modal: string; data?: unknown };

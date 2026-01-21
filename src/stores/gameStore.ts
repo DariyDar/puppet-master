@@ -107,8 +107,8 @@ export const useGameStore = create<GameState>()(
     level: 1,
     currentXp: 0,
     xpToNextLevel: XP_PER_LEVEL,
-    currentHp: 100,
-    maxHp: 100,
+    currentHp: 150,
+    maxHp: 150,
   },
 
   resources: {
@@ -133,13 +133,7 @@ export const useGameStore = create<GameState>()(
 
   upgradeLevels: {},
 
-  currentQuest: {
-    id: 'tutorial_01',
-    title: 'First Steps',
-    description: 'Kill an enemy',
-    progress: 0,
-    target: 1,
-  },
+  currentQuest: null,
 
   isModalOpen: false,
   currentModal: null,
@@ -397,6 +391,86 @@ export function setupStoreListeners(): void {
 
   gameEvents.on('soul:collected', (data: { amount: number }) => {
     useGameStore.getState().addSoul(data.amount);
+  });
+
+  // Farm resources collected - add directly to storage (not cargo)
+  gameEvents.on('resources:collected', (data: { type: string; amount: number; fromFarm?: boolean }) => {
+    if (data.fromFarm) {
+      // Resources from farms go directly to storage
+      useGameStore.getState().addToStorage(data.type as 'scrap' | 'polymer' | 'gems', data.amount);
+    }
+  });
+
+  // Quest events
+  gameEvents.on('quest:accepted', (_data: { questId: string }) => {
+    // Quest manager will handle the actual quest state
+    // We just need to update the HUD display
+    import('../game/managers/QuestManager').then(({ questManager }) => {
+      const quest = questManager.getCurrentQuest();
+      if (quest) {
+        const progress = quest.objectives.reduce((sum, obj) => sum + obj.current, 0);
+        const target = quest.objectives.reduce((sum, obj) => sum + obj.target, 0);
+        useGameStore.getState().updateQuest({
+          id: quest.id,
+          title: quest.title,
+          description: quest.objectives[0]?.description || quest.description,
+          progress,
+          target,
+        });
+      }
+    });
+  });
+
+  gameEvents.on('quest:progress', (_data: { questId: string; objectiveId: string; current: number; target: number }) => {
+    import('../game/managers/QuestManager').then(({ questManager }) => {
+      const quest = questManager.getCurrentQuest();
+      if (quest) {
+        const progress = quest.objectives.reduce((sum, obj) => sum + obj.current, 0);
+        const target = quest.objectives.reduce((sum, obj) => sum + obj.target, 0);
+        useGameStore.getState().updateQuest({
+          id: quest.id,
+          title: quest.title,
+          description: quest.objectives[0]?.description || quest.description,
+          progress,
+          target,
+        });
+      }
+    });
+  });
+
+  gameEvents.on('quest:completed', (_data: { questId: string }) => {
+    import('../game/managers/QuestManager').then(({ questManager }) => {
+      const quest = questManager.getCurrentQuest();
+      if (quest) {
+        useGameStore.getState().updateQuest({
+          id: quest.id,
+          title: quest.title,
+          description: 'Quest Complete! Click to claim rewards.',
+          progress: 1,
+          target: 1,
+        });
+      }
+    });
+  });
+
+  gameEvents.on('quest:rewards-claimed', () => {
+    // Clear current quest, QuestManager will auto-accept next tutorial
+    import('../game/managers/QuestManager').then(({ questManager }) => {
+      const quest = questManager.getCurrentQuest();
+      if (quest) {
+        const progress = quest.objectives.reduce((sum, obj) => sum + obj.current, 0);
+        const target = quest.objectives.reduce((sum, obj) => sum + obj.target, 0);
+        useGameStore.getState().updateQuest({
+          id: quest.id,
+          title: quest.title,
+          description: quest.objectives[0]?.description || quest.description,
+          progress,
+          target,
+        });
+      } else {
+        useGameStore.getState().updateQuest(null);
+      }
+    });
   });
 }
 

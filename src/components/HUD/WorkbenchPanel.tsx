@@ -19,6 +19,15 @@ interface UnitConfig {
   unlockLevel: number;
 }
 
+// Map unit IDs to their avatar images from Tiny Swords Enemy Pack
+const UNIT_AVATARS: Record<string, string> = {
+  creepy_clown: 'assets/sprites/ui/avatars/Enemy Avatars_01.png', // Gnome
+  bonnie: 'assets/sprites/ui/avatars/Enemy Avatars_06.png', // Bear
+  foxy: 'assets/sprites/ui/avatars/Enemy Avatars_07.png', // Gnoll
+  chica: 'assets/sprites/ui/avatars/Enemy Avatars_09.png', // Shaman
+  puppet: 'assets/sprites/ui/avatars/Enemy Avatars_11.png', // Lizard
+};
+
 export const WorkbenchPanel: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [isInRange, setIsInRange] = useState(false);
@@ -201,20 +210,36 @@ export const WorkbenchPanel: React.FC = () => {
                     opacity: isUnlocked ? 1 : 0.5,
                   }}
                 >
-                  {/* Unit icon placeholder */}
+                  {/* Unit avatar */}
                   <div
                     style={{
-                      width: '40px',
-                      height: '40px',
+                      width: '48px',
+                      height: '48px',
                       backgroundColor: isUnlocked ? '#483d8b' : '#333',
                       borderRadius: '6px',
                       marginRight: '12px',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
+                      overflow: 'hidden',
+                      border: `2px solid ${isUnlocked ? '#6a5acd' : '#444'}`,
                     }}
                   >
-                    <span style={{ color: '#ff6666', fontSize: '20px' }}>●</span>
+                    {UNIT_AVATARS[config.id] ? (
+                      <img
+                        src={UNIT_AVATARS[config.id]}
+                        alt={config.name}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'cover',
+                          imageRendering: 'pixelated',
+                          filter: isUnlocked ? 'none' : 'grayscale(100%)',
+                        }}
+                      />
+                    ) : (
+                      <span style={{ color: '#ff6666', fontSize: '20px' }}>●</span>
+                    )}
                   </div>
 
                   {/* Unit info */}
