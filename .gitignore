@@ -30,4 +30,4 @@ Thumbs.db
 *.tsbuildinfo
 
 # Assets source folder (raw assets, keep only public/)
-Assets/
+/Assets/
