@@ -1,3 +1,16 @@
+/**
+ * Phaser Configuration - Game settings and entity configs
+ *
+ * Contains:
+ * - Phaser engine configuration (rendering, physics, scaling)
+ * - GAME_CONFIG: Core gameplay constants (player stats, ranges, speeds)
+ * - UNIT_CONFIGS: Player army unit definitions (Gnome, Bear, Gnoll, Shaman, Lizard)
+ * - ENEMY_CONFIGS: Enemy types (Pawn variants, Lancer, Archer, Warrior, Monk)
+ * - TOWER_CONFIGS: Defense structure settings
+ * - HOUSE_CONFIGS: Enemy building settings
+ * - FARM_CONFIGS: Resource generator settings
+ */
+
 import Phaser from 'phaser';
 import { BootScene } from '../scenes/BootScene';
 import { LoadingScene } from '../scenes/LoadingScene';

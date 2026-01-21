@@ -1,3 +1,15 @@
+/**
+ * Event Manager - Cross-system communication via typed events
+ *
+ * This event bus allows communication between:
+ * - Phaser game scenes
+ * - React UI components
+ * - Game managers (Quest, etc.)
+ *
+ * Events are typed for TypeScript autocomplete and type safety.
+ * Usage: gameEvents.emit('event-name', data) / gameEvents.on('event-name', handler)
+ */
+
 // Event types for TypeScript
 export interface GameEventMap {
   // Scene events

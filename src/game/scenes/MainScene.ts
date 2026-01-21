@@ -3,7 +3,8 @@ import { GAME_CONFIG, UNIT_CONFIGS, ENEMY_CONFIGS, TOWER_CONFIGS, HOUSE_CONFIGS,
 import type { EnemyType, EnemyBehavior, TowerType, HouseType, FarmType } from '../config/PhaserConfig';
 import { gameEvents } from '../managers/EventManager';
 import { questManager } from '../managers/QuestManager';
-import { getSavedUpgrades, getSavedPlayerStats } from '../../stores/gameStore';
+import { getSavedUpgrades, getSavedPlayerStats, getSavedArmyUnits, saveArmyUnits } from '../../stores/gameStore';
+import type { SavedUnit } from '../../stores/gameStore';
 
 type EnemyState = 'idle' | 'chase' | 'attack' | 'flee' | 'dead';
 type UnitState = 'follow' | 'attack' | 'return' | 'dead';
@@ -200,6 +201,14 @@ export class MainScene extends Phaser.Scene {
       current: savedStats.currentHp,
       max: savedStats.maxHp,
     });
+
+    // Load saved army units
+    const savedArmy = getSavedArmyUnits();
+    if (savedArmy && savedArmy.length > 0) {
+      savedArmy.forEach((savedUnit: SavedUnit) => {
+        this.spawnUnitFromSave(savedUnit);
+      });
+    }
   }
 
   private createPlayerAnimations(): void {
@@ -1506,6 +1515,9 @@ export class MainScene extends Phaser.Scene {
     return house;
   }
 
+  // ========== PLAYER SYSTEM ==========
+  // Creates the player sprite (spider), handles movement, attacks, and soul draining
+
   private createPlayer(): void {
     // Spawn player at base center
     const spawnX = this.baseCenter.x;
@@ -2313,9 +2325,6 @@ export class MainScene extends Phaser.Scene {
 
     // Show green healing effect
     this.showHealEffect();
-
-    // Update HP bar
-    this.updatePlayerHealthBar();
   }
 
   private showHealEffect(): void {
@@ -2916,6 +2925,12 @@ export class MainScene extends Phaser.Scene {
       // Determine 8-directional direction based on angle
       const newDirection = this.getDirectionFromVelocity(velocityX, velocityY);
 
+      // Calculate animation speed based on movement speed
+      // joystickForce ranges from 0.1 to 1.0, animation should match
+      const movementRatio = this.joystickForce > 0.1 ? this.joystickForce : 1;
+      // Minimum animation speed of 0.4 to prevent too slow animations
+      const animSpeed = Math.max(0.4, movementRatio);
+
       // Update direction and animation (but attack animation takes priority)
       if (!this.isPlayerAttacking) {
         if (newDirection !== this.playerDirection || !this.player.anims.currentAnim?.key.includes('walk')) {
@@ -2923,12 +2938,18 @@ export class MainScene extends Phaser.Scene {
           this.player.play(`spider_walk_${this.playerDirection}`, true);
           this.playerShadow.play(`spider_walk_shadow_${this.playerDirection}`, true);
         }
+        // Adjust animation speed to match movement speed
+        this.player.anims.timeScale = animSpeed;
+        this.playerShadow.anims.timeScale = animSpeed;
       } else {
         // Update direction for attack but don't change animation
         this.playerDirection = newDirection;
       }
     } else {
-      // Standing still - play idle or nervous animation (but not during attack)
+      // Standing still - reset animation speed and play idle or nervous
+      this.player.anims.timeScale = 1;
+      this.playerShadow.anims.timeScale = 1;
+
       if (this.isPlayerDraining) {
         if (!this.player.anims.currentAnim?.key.includes('nervous')) {
           this.player.play(`spider_nervous_${this.playerDirection}`, true);
@@ -2978,8 +2999,9 @@ export class MainScene extends Phaser.Scene {
   }
 
   private updateShadowPosition(): void {
-    // Shadow follows player position with slight offset
-    this.playerShadow.setPosition(this.player.x, this.player.y + 5);
+    // Shadow follows player position - offset puts shadow at spider's "feet"
+    // Spider sprite is 256x256 scaled to 0.5, so offset of 25 places shadow near ground
+    this.playerShadow.setPosition(this.player.x, this.player.y + 25);
   }
 
   private handlePlayerAutoAttack(time: number): void {
@@ -3744,6 +3766,10 @@ export class MainScene extends Phaser.Scene {
 
     this.corpses.add(corpse);
   }
+
+  // ========== ENEMY AI SYSTEM ==========
+  // State machine for enemy behavior: idle, chase, attack, flee, dead
+  // Handles target finding, movement, attacking, and special abilities
 
   private updateEnemies(time: number): void {
     this.enemies.getChildren().forEach((enemy) => {
@@ -5027,6 +5053,84 @@ export class MainScene extends Phaser.Scene {
       duration: 300,
       ease: 'Back.easeOut',
     });
+
+    // Save army state after spawning
+    this.saveCurrentArmy();
+  }
+
+  // Spawn unit from saved data (used when loading game)
+  private spawnUnitFromSave(savedUnit: SavedUnit): void {
+    const config = UNIT_CONFIGS[savedUnit.unitType as keyof typeof UNIT_CONFIGS];
+    if (!config) return;
+
+    // Spawn near player
+    const angle = Math.random() * Math.PI * 2;
+    const distance = GAME_CONFIG.UNIT_SPREAD_RADIUS + Math.random() * 20;
+    const spawnX = this.player.x + Math.cos(angle) * distance;
+    const spawnY = this.player.y + Math.sin(angle) * distance;
+
+    const unitId = `unit_${this.unitIdCounter++}`;
+    const spriteKey = config.sprites?.idle || 'unit_placeholder';
+    const unit = this.physics.add.sprite(spawnX, spawnY, spriteKey);
+
+    if (config.sprites) {
+      this.createUnitAnimations(savedUnit.unitType, config);
+      const idleAnimKey = `${savedUnit.unitType}_idle`;
+      if (this.anims.exists(idleAnimKey)) {
+        unit.play(idleAnimKey);
+      }
+    }
+
+    if (config.scale) {
+      unit.setScale(config.scale);
+    }
+
+    // Set unit data with saved health values
+    unit.setData('type', 'unit');
+    unit.setData('id', unitId);
+    unit.setData('unitType', savedUnit.unitType);
+    unit.setData('health', savedUnit.health);
+    unit.setData('maxHealth', savedUnit.maxHealth);
+    unit.setData('damage', config.damage);
+    unit.setData('attackSpeed', config.attackSpeed);
+    unit.setData('attackRange', config.attackRange);
+    unit.setData('moveSpeed', config.moveSpeed);
+    unit.setData('attackType', config.attackType);
+    unit.setData('specialAbility', 'specialAbility' in config ? config.specialAbility : undefined);
+    unit.setData('lastAttackTime', 0);
+    unit.setData('state', 'follow' as UnitState);
+    unit.setData('currentTarget', null);
+    unit.setData('followOffset', { x: Math.cos(angle) * GAME_CONFIG.UNIT_FOLLOW_DISTANCE, y: Math.sin(angle) * GAME_CONFIG.UNIT_FOLLOW_DISTANCE });
+
+    unit.setCollideWorldBounds(true);
+    unit.setDepth(8);
+
+    const body = unit.body as Phaser.Physics.Arcade.Body;
+    body.setSize(24, 24);
+    body.setOffset(4, 4);
+
+    this.createHpBar(unitId);
+    this.units.add(unit);
+    this.armySize++;
+    this.setUnitTint(unit, savedUnit.unitType);
+
+    gameEvents.emit('army:updated', { count: this.armySize, limit: this.maxArmySize });
+  }
+
+  // Save current army state to localStorage
+  private saveCurrentArmy(): void {
+    const armyData: SavedUnit[] = [];
+    this.units.getChildren().forEach((child) => {
+      const unit = child as Phaser.Physics.Arcade.Sprite;
+      if (unit.active && unit.getData('state') !== 'dead') {
+        armyData.push({
+          unitType: unit.getData('unitType'),
+          health: unit.getData('health'),
+          maxHealth: unit.getData('maxHealth'),
+        });
+      }
+    });
+    saveArmyUnits(armyData);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -5084,6 +5188,8 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
+  // Unit AI: follows player, auto-attacks nearby enemies
+  // States: follow (move to player), attack (engage enemy), return (back to player), dead
   private updateUnits(time: number): void {
     this.units.getChildren().forEach((unitObj) => {
       const unit = unitObj as Phaser.Physics.Arcade.Sprite;
@@ -5239,6 +5345,9 @@ export class MainScene extends Phaser.Scene {
       }
     });
   }
+
+  // ========== TOWER SYSTEM ==========
+  // Enemy defense towers that shoot arrows at player and units
 
   private updateTowers(time: number): void {
     this.towers.getChildren().forEach((towerObj) => {
@@ -5750,6 +5859,9 @@ export class MainScene extends Phaser.Scene {
     // Check death
     if (newHealth <= 0) {
       this.killUnit(unit);
+    } else {
+      // Save army state after unit takes damage (but survives)
+      this.saveCurrentArmy();
     }
   }
 
@@ -5766,6 +5878,9 @@ export class MainScene extends Phaser.Scene {
     // Update army count
     this.armySize--;
     gameEvents.emit('army:updated', { count: this.armySize, limit: this.maxArmySize });
+
+    // Save army state after unit death
+    this.saveCurrentArmy();
 
     // Show death text
     this.showFloatingText(unit.x, unit.y - 10, `${UNIT_CONFIGS[unitType as keyof typeof UNIT_CONFIGS]?.name || 'Unit'} died`, 0xff4444);

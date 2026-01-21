@@ -1,3 +1,20 @@
+/**
+ * Game Store - Zustand state management with localStorage persistence
+ *
+ * This store manages all game state that needs to be:
+ * 1. Shared between Phaser game and React UI
+ * 2. Persisted to localStorage for save/load functionality
+ *
+ * Key features:
+ * - Player stats (HP, XP, level)
+ * - Resources (meat/scrap, wood/polymer, gold/gems, skulls/souls)
+ * - Cargo system (carried resources before depositing)
+ * - Army units (saved to localStorage)
+ * - Upgrade levels
+ * - Quest tracking
+ * - UI modal state
+ */
+
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { gameEvents } from '../game/managers/EventManager';
@@ -87,17 +104,32 @@ export interface GameState {
   closeModal: () => void;
   setLocation: (location: string) => void;
   setPaused: (paused: boolean) => void;
+  // Army persistence
+  savedArmy: SavedUnit[];
+  saveArmy: (units: SavedUnit[]) => void;
+  getSavedArmy: () => SavedUnit[];
 }
 
 const CARGO_MAX = 50;
 const XP_PER_LEVEL = 100;
+
+// Army unit saved data
+interface SavedUnit {
+  unitType: string;
+  health: number;
+  maxHealth: number;
+}
 
 // Persistent state keys that will be saved to localStorage
 interface PersistedState {
   playerStats: PlayerStats;
   resources: Resources;
   upgradeLevels: UpgradeLevels;
+  savedArmy: SavedUnit[];
 }
+
+// Exported for MainScene to use
+export type { SavedUnit };
 
 export const useGameStore = create<GameState>()(
   persist(
@@ -141,6 +173,9 @@ export const useGameStore = create<GameState>()(
 
   isPaused: false,
   currentLocation: 'base',
+
+  // Saved army units
+  savedArmy: [],
 
   // Actions
   updatePlayerHealth: (current, max) =>
@@ -312,6 +347,10 @@ export const useGameStore = create<GameState>()(
   setLocation: (location) => set({ currentLocation: location }),
 
   setPaused: (paused) => set({ isPaused: paused }),
+
+  // Army persistence actions
+  saveArmy: (units) => set({ savedArmy: units }),
+  getSavedArmy: () => get().savedArmy,
     }),
     {
       name: 'puppet-master-save',
@@ -320,6 +359,7 @@ export const useGameStore = create<GameState>()(
         playerStats: state.playerStats,
         resources: state.resources,
         upgradeLevels: state.upgradeLevels,
+        savedArmy: state.savedArmy,
       }),
       // Merge function to handle loading saved state
       merge: (persistedState, currentState) => {
@@ -330,6 +370,7 @@ export const useGameStore = create<GameState>()(
           playerStats: saved.playerStats ?? currentState.playerStats,
           resources: saved.resources ?? currentState.resources,
           upgradeLevels: saved.upgradeLevels ?? currentState.upgradeLevels,
+          savedArmy: saved.savedArmy ?? [],
         };
       },
     }
@@ -482,4 +523,14 @@ export function getSavedUpgrades(): { [key: string]: number } {
 // Function to get saved player stats
 export function getSavedPlayerStats(): PlayerStats {
   return useGameStore.getState().playerStats;
+}
+
+// Function to save army units
+export function saveArmyUnits(units: SavedUnit[]): void {
+  useGameStore.getState().saveArmy(units);
+}
+
+// Function to get saved army units
+export function getSavedArmyUnits(): SavedUnit[] {
+  return useGameStore.getState().getSavedArmy();
 }
