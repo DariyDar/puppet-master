@@ -65,6 +65,7 @@ export class MainScene extends Phaser.Scene {
   private storageBuilding!: Phaser.GameObjects.Sprite;
   private storageZone!: Phaser.GameObjects.Zone;
   private isInStorageRange: boolean = false;
+  private lastBaseRegenTime: number = 0;
   private workbenchBuilding!: Phaser.GameObjects.Sprite;
   private workbenchZone!: Phaser.GameObjects.Zone;
   private isInWorkbenchRange: boolean = false;
@@ -2224,6 +2225,7 @@ export class MainScene extends Phaser.Scene {
     this.updateSheep(time);
     this.updateHpBars();
     this.checkStorageRange();
+    this.updateBaseRegen(time);
     this.checkWorkbenchRange();
     this.checkPortalRange();
     this.checkFarmRange();
@@ -2284,6 +2286,73 @@ export class MainScene extends Phaser.Scene {
     if (distance > GAME_CONFIG.STORAGE_COLLECT_RADIUS) {
       this.isInStorageRange = false;
     }
+  }
+
+  // HP regeneration when player is at base (near storage)
+  private updateBaseRegen(time: number): void {
+    if (!this.isInStorageRange) return;
+
+    const REGEN_INTERVAL = 1000; // 1 second between heals
+    const REGEN_AMOUNT = 5; // HP restored per tick
+
+    if (time - this.lastBaseRegenTime < REGEN_INTERVAL) return;
+
+    const currentHealth = this.player.getData('health') as number;
+    const maxHealth = this.player.getData('maxHealth') as number;
+
+    if (currentHealth >= maxHealth) return;
+
+    // Heal player
+    const newHealth = Math.min(currentHealth + REGEN_AMOUNT, maxHealth);
+    this.player.setData('health', newHealth);
+    this.lastBaseRegenTime = time;
+
+    // Emit health update event
+    gameEvents.emit('player:health-changed', { current: newHealth, max: maxHealth });
+
+    // Show green healing effect
+    this.showHealEffect();
+
+    // Update HP bar
+    this.updatePlayerHealthBar();
+  }
+
+  private showHealEffect(): void {
+    // Green healing particles rising from player
+    const healColor = 0x44ff44;
+
+    // Create small green particles
+    for (let i = 0; i < 5; i++) {
+      const offsetX = Phaser.Math.Between(-15, 15);
+      const particle = this.add.circle(
+        this.player.x + offsetX,
+        this.player.y + 10,
+        3,
+        healColor,
+        0.8
+      );
+      particle.setDepth(100);
+
+      // Float upward and fade out
+      this.tweens.add({
+        targets: particle,
+        y: this.player.y - 30,
+        alpha: 0,
+        scale: 0.5,
+        duration: 600,
+        delay: i * 50,
+        ease: 'Quad.easeOut',
+        onComplete: () => particle.destroy(),
+      });
+    }
+
+    // Subtle green flash on player
+    this.player.setTint(healColor);
+    this.time.delayedCall(100, () => {
+      if (this.player.active) {
+        this.player.clearTint();
+      }
+    });
   }
 
   private checkWorkbenchRange(): void {
@@ -2473,6 +2542,10 @@ export class MainScene extends Phaser.Scene {
 
   // Sheep wandering behavior - they slowly wander around their spawn point
   private updateSheep(time: number): void {
+    const WATER_MARGIN = 120; // Safe distance from ocean (slightly more than water border)
+    const WANDER_RADIUS = 60; // How far sheep can wander from origin
+    const WANDER_SPEED = 20; // Slow walking speed (slower than player's 100)
+
     this.resourceDeposits.getChildren().forEach((depositObj) => {
       const deposit = depositObj as Phaser.Physics.Arcade.Sprite;
       const resourceType = deposit.getData('resourceType') as string;
@@ -2495,25 +2568,37 @@ export class MainScene extends Phaser.Scene {
         }
       }
 
+      // Always clamp sheep position to safe zone (prevent ocean escape)
+      const safeX = Phaser.Math.Clamp(deposit.x, WATER_MARGIN, this.mapWidth - WATER_MARGIN);
+      const safeY = Phaser.Math.Clamp(deposit.y, WATER_MARGIN, this.mapHeight - WATER_MARGIN);
+      if (deposit.x !== safeX || deposit.y !== safeY) {
+        deposit.setPosition(safeX, safeY);
+        deposit.setVelocity(0, 0);
+        deposit.setData('wanderState', 'idle');
+        deposit.setData('nextWanderTime', time + Phaser.Math.Between(1000, 3000));
+        if (this.anims.exists('sheep_idle_anim')) {
+          deposit.play('sheep_idle_anim', true);
+        }
+        return;
+      }
+
       const wanderState = deposit.getData('wanderState') as string;
       const nextWanderTime = deposit.getData('nextWanderTime') as number;
       const originX = deposit.getData('wanderOriginX') as number;
       const originY = deposit.getData('wanderOriginY') as number;
-      const WANDER_RADIUS = 80; // How far sheep can wander from origin
-      const WANDER_SPEED = 25; // Slow walking speed
 
       if (wanderState === 'idle') {
         // Check if it's time to start walking
         if (time >= nextWanderTime) {
           // Pick a random target within wander radius
           const angle = Math.random() * Math.PI * 2;
-          const distance = Phaser.Math.Between(30, WANDER_RADIUS);
+          const distance = Phaser.Math.Between(20, WANDER_RADIUS);
           const targetX = originX + Math.cos(angle) * distance;
           const targetY = originY + Math.sin(angle) * distance;
 
-          // Clamp to map bounds
-          const clampedX = Phaser.Math.Clamp(targetX, 50, this.mapWidth - 50);
-          const clampedY = Phaser.Math.Clamp(targetY, 50, this.mapHeight - 50);
+          // Clamp to safe zone (away from water)
+          const clampedX = Phaser.Math.Clamp(targetX, WATER_MARGIN, this.mapWidth - WATER_MARGIN);
+          const clampedY = Phaser.Math.Clamp(targetY, WATER_MARGIN, this.mapHeight - WATER_MARGIN);
 
           deposit.setData('wanderTargetX', clampedX);
           deposit.setData('wanderTargetY', clampedY);
@@ -2762,11 +2847,16 @@ export class MainScene extends Phaser.Scene {
       // Determine 8-directional direction based on angle
       const newDirection = this.getDirectionFromVelocity(velocityX, velocityY);
 
-      // Update direction and animation
-      if (newDirection !== this.playerDirection || !this.player.anims.currentAnim?.key.includes('walk')) {
+      // Update direction and animation (but attack animation takes priority)
+      if (!this.isPlayerAttacking) {
+        if (newDirection !== this.playerDirection || !this.player.anims.currentAnim?.key.includes('walk')) {
+          this.playerDirection = newDirection;
+          this.player.play(`spider_walk_${this.playerDirection}`, true);
+          this.playerShadow.play(`spider_walk_shadow_${this.playerDirection}`, true);
+        }
+      } else {
+        // Update direction for attack but don't change animation
         this.playerDirection = newDirection;
-        this.player.play(`spider_walk_${this.playerDirection}`, true);
-        this.playerShadow.play(`spider_walk_shadow_${this.playerDirection}`, true);
       }
     } else {
       // Standing still - play idle or nervous animation (but not during attack)
@@ -3676,11 +3766,19 @@ export class MainScene extends Phaser.Scene {
           break;
 
         case 'flee':
-          // Coward behavior - run away from threats
+          // Coward behavior - run away from threats, but fight back if caught
           if (!nearestTarget || nearestDistance > aggroRadius * 2) {
             sprite.setData('state', 'idle' as EnemyState);
             sprite.setData('cornered', false);
             sprite.setVelocity(0, 0);
+          } else if (nearestDistance <= attackRange) {
+            // Player caught up - fight back!
+            sprite.setData('state', 'attack' as EnemyState);
+            sprite.setVelocity(0, 0);
+            // Face the attacker
+            sprite.setFlipX(nearestTarget.x < sprite.x);
+            // Immediately attack
+            this.enemyAttack(sprite, nearestTarget, time);
           } else {
             // Run away from target
             const fleeAngle = Phaser.Math.Angle.Between(
@@ -3700,7 +3798,6 @@ export class MainScene extends Phaser.Scene {
             if (body.blocked.left || body.blocked.right || body.blocked.up || body.blocked.down) {
               sprite.setData('state', 'attack' as EnemyState);
               sprite.setData('cornered', true); // Mark as cornered so attack state knows
-              console.log(`[ENEMY] ${enemyType} CORNERED! Switching to attack mode`);
             }
           }
           break;
