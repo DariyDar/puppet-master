@@ -343,6 +343,18 @@ export class MainScene extends Phaser.Scene {
       });
     }
 
+    // Sheep walk animation (128x128 frames)
+    if (this.textures.exists('deposit_sheep_walk')) {
+      const sheepWalkTexture = this.textures.get('deposit_sheep_walk');
+      const sheepWalkFrameCount = sheepWalkTexture.frameTotal - 1;
+      this.anims.create({
+        key: 'sheep_walk_anim',
+        frames: this.anims.generateFrameNumbers('deposit_sheep_walk', { start: 0, end: Math.max(0, sheepWalkFrameCount - 1) }),
+        frameRate: 6,
+        repeat: -1
+      });
+    }
+
     // Dead knight corpse animation (128x128 frames) - for enemy corpses
     if (this.textures.exists('enemy_dead')) {
       const deadTexture = this.textures.get('enemy_dead');
@@ -449,14 +461,11 @@ export class MainScene extends Phaser.Scene {
   }
 
   private createDecorations(): void {
-    // Water border (island edge)
-    this.createWaterBorder();
+    // Water border (water background only, no foam or rocks)
+    this.createWaterBackground();
 
-    // Decorations (trees, bushes, rocks, stumps) disabled for now
+    // Decorations (trees, bushes, rocks, stumps, clouds, foam, water rocks) disabled
     // TODO: Re-enable when decoration system is properly designed
-
-    // Add floating clouds
-    this.createClouds();
   }
 
   private createClouds(): void {
@@ -501,6 +510,53 @@ export class MainScene extends Phaser.Scene {
           cloud.setTexture(newType);
         }
       });
+    }
+  }
+
+  private createWaterBackground(): void {
+    const waterMargin = 80; // Width of water border around island
+    const tileSize = 64;
+    const waterDepth = -15;
+
+    // Create water background around the entire island perimeter (no foam or rocks)
+    // Top water strip
+    for (let x = -tileSize; x < this.mapWidth + tileSize; x += tileSize) {
+      for (let y = -tileSize; y < waterMargin; y += tileSize) {
+        if (this.textures.exists('water_background')) {
+          const water = this.add.image(x, y, 'water_background');
+          water.setDepth(waterDepth);
+        }
+      }
+    }
+
+    // Bottom water strip
+    for (let x = -tileSize; x < this.mapWidth + tileSize; x += tileSize) {
+      for (let y = this.mapHeight - waterMargin; y < this.mapHeight + tileSize; y += tileSize) {
+        if (this.textures.exists('water_background')) {
+          const water = this.add.image(x, y, 'water_background');
+          water.setDepth(waterDepth);
+        }
+      }
+    }
+
+    // Left water strip
+    for (let x = -tileSize; x < waterMargin; x += tileSize) {
+      for (let y = waterMargin; y < this.mapHeight - waterMargin; y += tileSize) {
+        if (this.textures.exists('water_background')) {
+          const water = this.add.image(x, y, 'water_background');
+          water.setDepth(waterDepth);
+        }
+      }
+    }
+
+    // Right water strip
+    for (let x = this.mapWidth - waterMargin; x < this.mapWidth + tileSize; x += tileSize) {
+      for (let y = waterMargin; y < this.mapHeight - waterMargin; y += tileSize) {
+        if (this.textures.exists('water_background')) {
+          const water = this.add.image(x, y, 'water_background');
+          water.setDepth(waterDepth);
+        }
+      }
     }
   }
 
@@ -1375,17 +1431,7 @@ export class MainScene extends Phaser.Scene {
     // Create HP bar
     this.createHpBar(towerId);
 
-    // Add label
-    const label = this.add.text(x, y - 50, config.name, {
-      fontFamily: 'Arial',
-      fontSize: '10px',
-      color: '#ff6644',
-      stroke: '#000000',
-      strokeThickness: 2,
-    });
-    label.setOrigin(0.5);
-    label.setDepth(5);
-    this.depositLabels.set(towerId, label);
+    // Building labels removed for cleaner UI
 
     this.towers.add(tower);
 
@@ -1453,17 +1499,7 @@ export class MainScene extends Phaser.Scene {
     // Create HP bar
     this.createHpBar(houseId);
 
-    // Add label
-    const label = this.add.text(x, y - 40, config.name, {
-      fontFamily: 'Arial',
-      fontSize: '10px',
-      color: '#ddaa66',
-      stroke: '#000000',
-      strokeThickness: 2,
-    });
-    label.setOrigin(0.5);
-    label.setDepth(5);
-    this.depositLabels.set(houseId, label);
+    // Building labels removed for cleaner UI
 
     this.houses.add(house);
     return house;
@@ -1728,8 +1764,26 @@ export class MainScene extends Phaser.Scene {
   private setupCamera(): void {
     const camera = this.cameras.main;
     camera.startFollow(this.player, true, GAME_CONFIG.CAMERA_LERP, GAME_CONFIG.CAMERA_LERP);
-    camera.setZoom(GAME_CONFIG.CAMERA_ZOOM);
+
+    // Use lower zoom on mobile devices for better overview
+    const isMobile = this.isMobileDevice();
+    const zoomLevel = isMobile ? GAME_CONFIG.CAMERA_ZOOM * 0.7 : GAME_CONFIG.CAMERA_ZOOM; // 1.4 on mobile, 2 on desktop
+    camera.setZoom(zoomLevel);
+
     camera.setBounds(0, 0, this.mapWidth, this.mapHeight);
+  }
+
+  private isMobileDevice(): boolean {
+    // Check for touch support and screen size
+    const hasTouchScreen = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    const isSmallScreen = window.innerWidth <= 1024;
+
+    // Also check user agent for mobile devices
+    const mobileUserAgent = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      navigator.userAgent
+    );
+
+    return hasTouchScreen && (isSmallScreen || mobileUserAgent);
   }
 
   private setupInput(): void {
@@ -2110,52 +2164,53 @@ export class MainScene extends Phaser.Scene {
   }
 
   private showLevelUpEffect(newLevel: number): void {
-    // Flash effect on player - golden color
-    this.player.setTint(0xffd700);
+    // Purple color for level up (matches XP bar)
+    const purpleColor = 0x8844ff;
+
+    // Flash effect on player - purple color
+    this.player.setTint(purpleColor);
     this.time.delayedCall(100, () => this.player.setTint(0xffffff));
-    this.time.delayedCall(200, () => this.player.setTint(0xffd700));
+    this.time.delayedCall(200, () => this.player.setTint(purpleColor));
     this.time.delayedCall(300, () => this.player.setTint(0xffffff));
-    this.time.delayedCall(400, () => this.player.setTint(0xffd700));
+    this.time.delayedCall(400, () => this.player.setTint(purpleColor));
     this.time.delayedCall(500, () => this.player.setTint(0xffffff));
 
-    // Floating text - golden
-    this.showFloatingText(this.player.x, this.player.y - 50, `LEVEL UP! Lv.${newLevel}`, 0xffd700);
+    // Floating text - purple
+    this.showFloatingText(this.player.x, this.player.y - 50, `LEVEL UP! Lv.${newLevel}`, purpleColor);
 
-    // Golden explosion effect
-    if (this.anims.exists('explosion_anim')) {
-      const explosion = this.add.sprite(this.player.x, this.player.y, 'effect_explosion1');
-      explosion.setScale(1.2);
-      explosion.setDepth(100);
-      explosion.setTint(0xffd700); // Golden tint
-      explosion.play('explosion_anim');
-      explosion.once('animationcomplete', () => explosion.destroy());
+    // Multiple expanding rings effect (no explosion)
+    for (let i = 0; i < 3; i++) {
+      this.time.delayedCall(i * 150, () => {
+        const ring = this.add.circle(this.player.x, this.player.y, 15, purpleColor, 0);
+        ring.setStrokeStyle(3 - i, purpleColor, 1);
+        ring.setDepth(99);
+        this.tweens.add({
+          targets: ring,
+          scaleX: 5,
+          scaleY: 5,
+          alpha: 0,
+          duration: 800,
+          ease: 'Power2',
+          onComplete: () => ring.destroy(),
+        });
+      });
     }
 
-    // Secondary ring effect
-    const ring = this.add.circle(this.player.x, this.player.y, 20, 0xffd700, 0);
-    ring.setStrokeStyle(4, 0xffd700, 1);
-    ring.setDepth(99);
-    this.tweens.add({
-      targets: ring,
-      scaleX: 4,
-      scaleY: 4,
-      alpha: 0,
-      duration: 600,
-      ease: 'Power2',
-      onComplete: () => ring.destroy(),
-    });
-
-    // Particle burst effect - golden particles
+    // Particle burst effect - purple particles rising up
     const particles = this.add.particles(this.player.x, this.player.y, 'particle_placeholder', {
-      speed: { min: 80, max: 200 },
-      scale: { start: 0.6, end: 0 },
-      lifespan: 1000,
-      quantity: 30,
-      tint: 0xffd700,
+      speed: { min: 50, max: 150 },
+      angle: { min: 250, max: 290 }, // Upward
+      scale: { start: 0.5, end: 0 },
+      lifespan: 1200,
+      quantity: 20,
+      tint: purpleColor,
       emitting: false,
     });
-    particles.explode(30);
-    this.time.delayedCall(1200, () => particles.destroy());
+    particles.explode(20);
+    this.time.delayedCall(1400, () => particles.destroy());
+
+    // Emit event for UI to show XP bar pulse effect
+    gameEvents.emit('player:level-up-visual', { newLevel });
   }
 
   update(time: number, delta: number): void {
@@ -2166,6 +2221,7 @@ export class MainScene extends Phaser.Scene {
     this.updateTowers(time);
     this.updateHouses(time);
     this.updateFarms(time);
+    this.updateSheep(time);
     this.updateHpBars();
     this.checkStorageRange();
     this.checkWorkbenchRange();
@@ -2410,6 +2466,92 @@ export class MainScene extends Phaser.Scene {
           resourceText.setColor('#ffff66'); // Yellow when half full
         } else {
           resourceText.setColor('#aaffaa'); // Green when low
+        }
+      }
+    });
+  }
+
+  // Sheep wandering behavior - they slowly wander around their spawn point
+  private updateSheep(time: number): void {
+    this.resourceDeposits.getChildren().forEach((depositObj) => {
+      const deposit = depositObj as Phaser.Physics.Arcade.Sprite;
+      const resourceType = deposit.getData('resourceType') as string;
+
+      // Only update sheep (scrap type)
+      if (resourceType !== 'scrap') return;
+
+      // Initialize sheep wandering data if not set
+      if (deposit.getData('wanderState') === undefined) {
+        deposit.setData('wanderState', 'idle'); // 'idle' or 'walking'
+        deposit.setData('wanderTargetX', deposit.x);
+        deposit.setData('wanderTargetY', deposit.y);
+        deposit.setData('wanderOriginX', deposit.x);
+        deposit.setData('wanderOriginY', deposit.y);
+        deposit.setData('nextWanderTime', time + Phaser.Math.Between(2000, 5000));
+        // Make sheep movable
+        const body = deposit.body as Phaser.Physics.Arcade.Body;
+        if (body) {
+          body.moves = true;
+        }
+      }
+
+      const wanderState = deposit.getData('wanderState') as string;
+      const nextWanderTime = deposit.getData('nextWanderTime') as number;
+      const originX = deposit.getData('wanderOriginX') as number;
+      const originY = deposit.getData('wanderOriginY') as number;
+      const WANDER_RADIUS = 80; // How far sheep can wander from origin
+      const WANDER_SPEED = 25; // Slow walking speed
+
+      if (wanderState === 'idle') {
+        // Check if it's time to start walking
+        if (time >= nextWanderTime) {
+          // Pick a random target within wander radius
+          const angle = Math.random() * Math.PI * 2;
+          const distance = Phaser.Math.Between(30, WANDER_RADIUS);
+          const targetX = originX + Math.cos(angle) * distance;
+          const targetY = originY + Math.sin(angle) * distance;
+
+          // Clamp to map bounds
+          const clampedX = Phaser.Math.Clamp(targetX, 50, this.mapWidth - 50);
+          const clampedY = Phaser.Math.Clamp(targetY, 50, this.mapHeight - 50);
+
+          deposit.setData('wanderTargetX', clampedX);
+          deposit.setData('wanderTargetY', clampedY);
+          deposit.setData('wanderState', 'walking');
+
+          // Play walk animation
+          if (this.anims.exists('sheep_walk_anim')) {
+            deposit.play('sheep_walk_anim', true);
+          }
+
+          // Flip based on direction
+          deposit.setFlipX(clampedX < deposit.x);
+        }
+      } else if (wanderState === 'walking') {
+        const targetX = deposit.getData('wanderTargetX') as number;
+        const targetY = deposit.getData('wanderTargetY') as number;
+        const distanceToTarget = Phaser.Math.Distance.Between(deposit.x, deposit.y, targetX, targetY);
+
+        if (distanceToTarget < 5) {
+          // Reached target, go back to idle
+          deposit.setData('wanderState', 'idle');
+          deposit.setData('nextWanderTime', time + Phaser.Math.Between(3000, 8000));
+          deposit.setVelocity(0, 0);
+
+          // Play idle animation
+          if (this.anims.exists('sheep_idle_anim')) {
+            deposit.play('sheep_idle_anim', true);
+          }
+        } else {
+          // Move toward target
+          const angle = Phaser.Math.Angle.Between(deposit.x, deposit.y, targetX, targetY);
+          deposit.setVelocity(
+            Math.cos(angle) * WANDER_SPEED,
+            Math.sin(angle) * WANDER_SPEED
+          );
+
+          // Flip based on movement direction
+          deposit.setFlipX(Math.cos(angle) < 0);
         }
       }
     });
@@ -3486,6 +3628,7 @@ export class MainScene extends Phaser.Scene {
       const moveSpeed = sprite.getData('moveSpeed') as number;
       const behavior = sprite.getData('behavior') as EnemyBehavior;
       const attackType = sprite.getData('attackType') as string || 'melee';
+      const enemyType = sprite.getData('enemyType') as EnemyType;
 
       // Find nearest target (player or unit)
       let nearestTarget: Phaser.Physics.Arcade.Sprite | null = null;
@@ -3536,6 +3679,7 @@ export class MainScene extends Phaser.Scene {
           // Coward behavior - run away from threats
           if (!nearestTarget || nearestDistance > aggroRadius * 2) {
             sprite.setData('state', 'idle' as EnemyState);
+            sprite.setData('cornered', false);
             sprite.setVelocity(0, 0);
           } else {
             // Run away from target
@@ -3551,10 +3695,12 @@ export class MainScene extends Phaser.Scene {
             );
             sprite.setFlipX(nearestTarget.x > sprite.x);
 
-            // If cornered (at world bounds), turn and fight
+            // If cornered (at world bounds or blocked by obstacle), turn and fight
             const body = sprite.body as Phaser.Physics.Arcade.Body;
             if (body.blocked.left || body.blocked.right || body.blocked.up || body.blocked.down) {
               sprite.setData('state', 'attack' as EnemyState);
+              sprite.setData('cornered', true); // Mark as cornered so attack state knows
+              console.log(`[ENEMY] ${enemyType} CORNERED! Switching to attack mode`);
             }
           }
           break;
@@ -3563,9 +3709,12 @@ export class MainScene extends Phaser.Scene {
           if (!nearestTarget || nearestDistance > aggroRadius * 1.5) {
             sprite.setData('state', 'idle' as EnemyState);
             sprite.setVelocity(0, 0);
-          } else if (nearestDistance < attackRange) {
+          } else if (nearestDistance <= attackRange) {
+            // In attack range - switch to attack AND immediately try to attack
             sprite.setData('state', 'attack' as EnemyState);
             sprite.setVelocity(0, 0);
+            // Immediately attack (don't wait for next frame)
+            this.enemyAttack(sprite, nearestTarget, time);
           } else {
             // Ranged enemies try to maintain distance
             if (attackType === 'ranged' && nearestDistance < attackRange * 0.5) {
@@ -3597,27 +3746,57 @@ export class MainScene extends Phaser.Scene {
           break;
 
         case 'attack':
-          // Ranged units can attack while moving back slightly
-          if (attackType === 'ranged' && nearestTarget && nearestDistance < attackRange * 0.4) {
-            // Back away while attacking
-            const retreatAngle = Phaser.Math.Angle.Between(
-              nearestTarget.x,
-              nearestTarget.y,
-              sprite.x,
-              sprite.y
-            );
-            sprite.setVelocity(
-              Math.cos(retreatAngle) * moveSpeed * 0.5,
-              Math.sin(retreatAngle) * moveSpeed * 0.5
-            );
-          } else {
-            sprite.setVelocity(0, 0);
-          }
+          {
+            const isCornered = sprite.getData('cornered') as boolean;
 
-          if (!nearestTarget || nearestDistance > attackRange * 1.2) {
-            sprite.setData('state', 'chase' as EnemyState);
-          } else {
-            this.enemyAttack(sprite, nearestTarget, time);
+            // Cornered cowards need to approach their target to attack
+            if (isCornered && nearestTarget && nearestDistance > attackRange) {
+              // Move toward target to get in attack range
+              const angle = Phaser.Math.Angle.Between(
+                sprite.x,
+                sprite.y,
+                nearestTarget.x,
+                nearestTarget.y
+              );
+              sprite.setVelocity(Math.cos(angle) * moveSpeed, Math.sin(angle) * moveSpeed);
+              sprite.setFlipX(nearestTarget.x < sprite.x);
+            } else if (attackType === 'ranged' && nearestTarget && nearestDistance < attackRange * 0.4) {
+              // Ranged units back away while attacking
+              const retreatAngle = Phaser.Math.Angle.Between(
+                nearestTarget.x,
+                nearestTarget.y,
+                sprite.x,
+                sprite.y
+              );
+              sprite.setVelocity(
+                Math.cos(retreatAngle) * moveSpeed * 0.5,
+                Math.sin(retreatAngle) * moveSpeed * 0.5
+              );
+            } else {
+              sprite.setVelocity(0, 0);
+            }
+
+            // If no target, go back to appropriate state
+            if (!nearestTarget) {
+              sprite.setData('cornered', false);
+              if (behavior === 'coward') {
+                sprite.setData('state', 'flee' as EnemyState);
+              } else {
+                sprite.setData('state', 'chase' as EnemyState);
+              }
+            } else if (!isCornered && nearestDistance > attackRange * 1.5) {
+              // Regular enemies go back to chase if out of range
+              // Cornered cowards stay aggressive
+              if (behavior === 'coward') {
+                sprite.setData('state', 'flee' as EnemyState);
+              } else {
+                sprite.setData('state', 'chase' as EnemyState);
+              }
+            } else if (nearestDistance <= attackRange) {
+              // In range - attack!
+              this.enemyAttack(sprite, nearestTarget, time);
+            }
+            // else: cornered and approaching target, continue moving
           }
           break;
       }
@@ -3734,6 +3913,8 @@ export class MainScene extends Phaser.Scene {
     if (time - lastAttackTime < attackCooldown) {
       return;
     }
+
+    console.log(`[ENEMY ATTACK] ${enemyType} attacking! cooldown=${attackCooldown.toFixed(0)}ms`);
 
     const damage = enemy.getData('damage') as number;
     const attackType = enemy.getData('attackType') as string || 'melee';
@@ -4023,19 +4204,32 @@ export class MainScene extends Phaser.Scene {
         }
       },
       onComplete: () => {
-        // Apply damage when arrow arrives
+        // Check if target is still at the impact location (arrows can miss!)
+        const hitRadius = 30; // How close target must be to get hit
+        let didHit = false;
+
         if (targetRef.active) {
-          if (targetType === 'player') {
-            this.dealDamageToPlayer(damage, targetRef);
-          } else if (targetType === 'unit') {
-            this.dealDamageToUnit(targetRef, damage);
+          const currentDistance = Phaser.Math.Distance.Between(
+            targetX, targetY,
+            targetRef.x, targetRef.y
+          );
+
+          if (currentDistance <= hitRadius) {
+            // Target is still in the hit zone - apply damage
+            didHit = true;
+            if (targetType === 'player') {
+              this.dealDamageToPlayer(damage, targetRef);
+            } else if (targetType === 'unit') {
+              this.dealDamageToUnit(targetRef, damage);
+            }
           }
         }
 
-        // Arrow sticks in ground
+        // Arrow sticks in ground (use no-tip version for missed shots)
         if (isArrowSprite && arrow instanceof Phaser.GameObjects.Sprite) {
-          // Point downward (stuck in ground)
-          arrow.setRotation(Math.PI / 2);
+          // Use frame 1 (no tip) for ground arrows, frame 0 still used during flight
+          arrow.setFrame(1); // No-tip arrow for ground
+          arrow.setRotation(Math.PI / 2); // Point downward
           arrow.setDepth(2); // Below entities
           arrow.setAlpha(0.7);
 
@@ -4922,8 +5116,8 @@ export class MainScene extends Phaser.Scene {
       if (nearestTarget) {
         tower.setData('lastAttackTime', time);
 
-        // Fire projectile
-        this.fireProjectile(tower.x, tower.y - 20, nearestTarget, damage, 0xff4444, 'enemy');
+        // Fire arrow projectile (like archers, can miss if target moves)
+        this.fireArrowProjectile(tower.x, tower.y - 30, nearestTarget, damage);
 
         // Visual feedback - flash red then return to normal
         tower.setTint(0xff6644);

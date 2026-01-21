@@ -25,32 +25,29 @@ export const DebugMenu: React.FC = () => {
     <div
       style={{
         position: 'fixed',
-        top: 20,
-        right: 20,
+        top: 0,
+        right: 0,
         zIndex: 2000,
         pointerEvents: 'auto',
       }}
     >
-      {/* Toggle Button */}
+      {/* Hidden Toggle Button - 40px tap area but nearly invisible */}
       <button
         onClick={() => setIsOpen(!isOpen)}
         style={{
           width: '40px',
           height: '40px',
-          borderRadius: '8px',
-          border: '2px solid #ffd700',
-          backgroundColor: isOpen ? 'rgba(255, 215, 0, 0.3)' : 'rgba(0, 0, 0, 0.7)',
-          color: '#ffd700',
-          fontSize: '20px',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          transition: 'all 0.2s ease',
+          backgroundColor: 'transparent',
+          border: 'none',
+          cursor: 'default',
+          opacity: isOpen ? 1 : 0.01,
+          transition: 'opacity 0.2s ease',
         }}
-        title="Debug Menu"
+        title=""
       >
-        ⚡
+        {isOpen && (
+          <span style={{ color: '#ffd700', fontSize: '20px' }}>✖</span>
+        )}
       </button>
 
       {/* Debug Panel */}
@@ -113,8 +110,8 @@ export const DebugMenu: React.FC = () => {
                 onClick={() => handleAddCurrency('scrap', 100)}
                 style={{
                   padding: '6px 10px',
-                  backgroundColor: 'rgba(112, 128, 144, 0.3)',
-                  border: '1px solid #708090',
+                  backgroundColor: 'rgba(224, 112, 80, 0.3)',
+                  border: '1px solid #e07050',
                   borderRadius: '4px',
                   color: '#fff',
                   fontSize: '11px',
@@ -122,17 +119,17 @@ export const DebugMenu: React.FC = () => {
                   textAlign: 'left',
                   transition: 'background-color 0.2s',
                 }}
-                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(112, 128, 144, 0.5)')}
-                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'rgba(112, 128, 144, 0.3)')}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(224, 112, 80, 0.5)')}
+                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'rgba(224, 112, 80, 0.3)')}
               >
-                + 100 Scrap
+                + 100 Meat
               </button>
               <button
                 onClick={() => handleAddCurrency('polymer', 50)}
                 style={{
                   padding: '6px 10px',
-                  backgroundColor: 'rgba(50, 205, 50, 0.3)',
-                  border: '1px solid #32cd32',
+                  backgroundColor: 'rgba(139, 69, 19, 0.3)',
+                  border: '1px solid #8B4513',
                   borderRadius: '4px',
                   color: '#fff',
                   fontSize: '11px',
@@ -140,17 +137,17 @@ export const DebugMenu: React.FC = () => {
                   textAlign: 'left',
                   transition: 'background-color 0.2s',
                 }}
-                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(50, 205, 50, 0.5)')}
-                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'rgba(50, 205, 50, 0.3)')}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(139, 69, 19, 0.5)')}
+                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'rgba(139, 69, 19, 0.3)')}
               >
-                + 50 Polymer
+                + 50 Wood
               </button>
               <button
                 onClick={() => handleAddCurrency('gems', 10)}
                 style={{
                   padding: '6px 10px',
-                  backgroundColor: 'rgba(0, 191, 255, 0.3)',
-                  border: '1px solid #00bfff',
+                  backgroundColor: 'rgba(255, 215, 0, 0.3)',
+                  border: '1px solid #FFD700',
                   borderRadius: '4px',
                   color: '#fff',
                   fontSize: '11px',
@@ -158,10 +155,10 @@ export const DebugMenu: React.FC = () => {
                   textAlign: 'left',
                   transition: 'background-color 0.2s',
                 }}
-                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(0, 191, 255, 0.5)')}
-                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'rgba(0, 191, 255, 0.3)')}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(255, 215, 0, 0.5)')}
+                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'rgba(255, 215, 0, 0.3)')}
               >
-                + 10 Gems
+                + 10 Gold
               </button>
               <button
                 onClick={() => handleAddCurrency('souls', 10)}
@@ -179,7 +176,7 @@ export const DebugMenu: React.FC = () => {
                 onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'rgba(148, 0, 211, 0.5)')}
                 onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'rgba(148, 0, 211, 0.3)')}
               >
-                + 10 Souls
+                + 10 Skulls
               </button>
             </div>
           </div>
@@ -187,10 +184,10 @@ export const DebugMenu: React.FC = () => {
           {/* Current Resources Display */}
           <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(255, 255, 255, 0.2)' }}>
             <div style={{ color: '#888', fontSize: '10px', marginBottom: '4px' }}>CURRENT:</div>
-            <div style={{ color: '#708090', fontSize: '10px' }}>Scrap: {resources.scrap}</div>
-            <div style={{ color: '#32cd32', fontSize: '10px' }}>Polymer: {resources.polymer}</div>
-            <div style={{ color: '#00bfff', fontSize: '10px' }}>Gems: {resources.gems}</div>
-            <div style={{ color: '#9400d3', fontSize: '10px' }}>Souls: {resources.souls}</div>
+            <div style={{ color: '#e07050', fontSize: '10px' }}>Meat: {resources.scrap}</div>
+            <div style={{ color: '#8B4513', fontSize: '10px' }}>Wood: {resources.polymer}</div>
+            <div style={{ color: '#FFD700', fontSize: '10px' }}>Gold: {resources.gems}</div>
+            <div style={{ color: '#9400d3', fontSize: '10px' }}>Skulls: {resources.souls}</div>
           </div>
 
           {/* Reset Progress */}

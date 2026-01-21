@@ -169,6 +169,7 @@ export class LoadingScene extends Phaser.Scene {
 
     // Resource sources (deposits on map): Sheep for meat, Trees for wood, Gold Mine for gold
     this.load.spritesheet('deposit_sheep', 'assets/sprites/resources/Sheep_Idle.png', { frameWidth: 128, frameHeight: 128 });
+    this.load.spritesheet('deposit_sheep_walk', 'assets/sprites/resources/Sheep_Move.png', { frameWidth: 128, frameHeight: 128 });
     this.load.image('deposit_goldmine', 'assets/sprites/resources/GoldMine_Active.png');
     // Wood deposits use tree sprites from decorations
 

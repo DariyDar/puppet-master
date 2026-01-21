@@ -106,7 +106,7 @@ export const UpgradePanel: React.FC = () => {
     <div
       style={{
         position: 'fixed',
-        bottom: 20,
+        bottom: 160, // Above joystick (120px + 20px padding + 20px gap)
         left: 20,
         zIndex: 1500,
         pointerEvents: 'auto',

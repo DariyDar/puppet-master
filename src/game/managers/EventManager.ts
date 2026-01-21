@@ -8,6 +8,7 @@ export interface GameEventMap {
   'player:health-changed': { current: number; max: number };
   'player:died': { position: { x: number; y: number } };
   'player:level-up': { newLevel: number };
+  'player:level-up-visual': { newLevel: number };
   'player:exp-gained': { amount: number; total?: number; toNext?: number };
   'player:upgrade-purchased': { upgradeId: string; newLevel: number };
 
